@@ -1,0 +1,33 @@
+# Slack app manifest for the LoopGuru bot (PRD §9.1).
+# Create the app from this manifest at https://api.slack.com/apps -> Create New App
+# -> From an app manifest. After changing scopes you MUST reinstall the app.
+#
+# Minimum read-only scopes. DM scopes are intentionally excluded.
+# `channels:join` is optional — include it only if you want the bot to auto-join
+# public channels (SLACK_AUTO_JOIN=true); otherwise invite the bot manually.
+
+display_information:
+  name: loopguru
+  description: Internal knowledge agent that indexes allowlisted channels to answer how-to questions.
+  background_color: "#4a154b"
+
+features:
+  bot_user:
+    display_name: loopguru
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      - channels:history      # read public channel messages
+      - channels:read         # public channel metadata
+      - groups:history        # read private channel messages (bot must be invited)
+      - groups:read           # private channel metadata
+      - users:read            # resolve user IDs -> display names
+      - files:read            # download shared files (PDF/MD/txt/docx)
+      # - channels:join       # OPTIONAL: allow auto-join of public channels
+
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

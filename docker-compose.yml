@@ -1,0 +1,116 @@
+# LoopGuru — full stack (PRD §21).
+# Named volumes persist data across restarts (avoid data loss + costly re-embed).
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: loopguru
+      POSTGRES_PASSWORD: loopguru
+      POSTGRES_DB: loopguru
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loopguru -d loopguru"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    volumes:
+      - qdrantdata:/qdrant/storage
+    # The qdrant image ships no shell/curl, so we don't declare a healthcheck;
+    # app services depend on service_started and retry against Qdrant at runtime.
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot migration step; app services wait for it to complete successfully.
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    command: ["python", "-m", "app.api"]
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 1g
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command:
+      - "celery"
+      - "-A"
+      - "app.workers.celery_app:celery_app"
+      - "worker"
+      - "-Q"
+      - "knowledge"
+      - "--loglevel=INFO"
+      - "--concurrency=4"
+      - "--prefetch-multiplier=1"
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    mem_limit: 2g
+    restart: unless-stopped
+
+  beat:
+    build: .
+    command:
+      - "celery"
+      - "-A"
+      - "app.workers.celery_app:celery_app"
+      - "beat"
+      - "--loglevel=INFO"
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  qdrantdata:
+  rabbitmqdata:

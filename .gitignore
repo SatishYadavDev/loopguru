@@ -1,0 +1,23 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# local data / scratch
+poc/output/
+*.log
+
+# os / editor cruft
+.DS_Store
+.idea/
+.vscode/
