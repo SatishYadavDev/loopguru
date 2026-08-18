@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL")
     embedding_dim: int = Field(default=1536, alias="EMBEDDING_DIM")
     chat_model: str = Field(default="gpt-4o-mini", alias="CHAT_MODEL")
+    vision_model: str = Field(default="gpt-4o-mini", alias="VISION_MODEL")
+    enable_vision: bool = Field(default=True, alias="ENABLE_VISION")
+    max_image_pages: int = Field(default=8, alias="MAX_IMAGE_PAGES")
     openai_timeout_s: float = Field(default=60, alias="OPENAI_TIMEOUT_S")
     qdrant_url: str = Field(default="http://localhost:6333", alias="QDRANT_URL")
     qdrant_collection: str = Field(default="knowledge", alias="QDRANT_COLLECTION")
@@ -60,6 +63,9 @@ class Settings(BaseSettings):
 
     # --- slack ---
     slack_bot_token: str = Field(default="", alias="SLACK_BOT_TOKEN")
+    slack_signing_secret: str = Field(default="", alias="SLACK_SIGNING_SECRET")
+    slack_app_token: str = Field(default="", alias="SLACK_APP_TOKEN")  # xapp-… for Socket Mode
+    slack_bot_user_id: str = Field(default="", alias="SLACK_BOT_USER_ID")
     slack_workspace_subdomain: str = Field(default="", alias="SLACK_WORKSPACE_SUBDOMAIN")
     slack_channels: list[str] = Field(default_factory=list, alias="SLACK_CHANNELS")
     slack_channel_priority: list[str] = Field(
@@ -74,8 +80,10 @@ class Settings(BaseSettings):
     rag_relevance_floor: float = Field(default=0.35, alias="RAG_RELEVANCE_FLOOR")
     rag_dedup_sim: float = Field(default=0.97, alias="RAG_DEDUP_SIM")
     rag_recency_halflife_days: float = Field(default=180, alias="RAG_RECENCY_HALFLIFE_DAYS")
-    rag_expand_max_chunks: int = Field(default=6, alias="RAG_EXPAND_MAX_CHUNKS")
-    rag_context_token_budget: int = Field(default=6000, alias="RAG_CONTEXT_TOKEN_BUDGET")
+    rag_expand_max_chunks: int = Field(default=24, alias="RAG_EXPAND_MAX_CHUNKS")
+    rag_context_token_budget: int = Field(default=12000, alias="RAG_CONTEXT_TOKEN_BUDGET")
+    rag_hybrid: bool = Field(default=True, alias="RAG_HYBRID")  # BM25 + vector fusion
+    rag_rrf_k: int = Field(default=60, alias="RAG_RRF_K")  # reciprocal-rank-fusion constant
 
     # --- ingestion ---
     sync_overlap_days: float = Field(default=2, alias="SYNC_OVERLAP_DAYS")
@@ -86,6 +94,14 @@ class Settings(BaseSettings):
     chunk_target_tokens: int = Field(default=650, alias="CHUNK_TARGET_TOKENS")
     chunk_overlap_ratio: float = Field(default=0.12, alias="CHUNK_OVERLAP_RATIO")
     chunk_max_tokens: int = Field(default=8000, alias="CHUNK_MAX_TOKENS")
+
+    # --- azure devops (boards) ---
+    azure_devops_org: str = Field(default="", alias="AZURE_DEVOPS_ORG")
+    azure_devops_project: str = Field(default="", alias="AZURE_DEVOPS_PROJECT")
+    azure_devops_pat: str = Field(default="", alias="AZURE_DEVOPS_PAT")
+    azure_devops_workitem_type: str = Field(default="Task", alias="AZURE_DEVOPS_WORKITEM_TYPE")
+    # Some projects require System.AssignedTo — set to a valid user email/display name.
+    azure_devops_assigned_to: str = Field(default="", alias="AZURE_DEVOPS_ASSIGNED_TO")
 
     # --- api / ops ---
     api_key: str = Field(default="", alias="API_KEY")

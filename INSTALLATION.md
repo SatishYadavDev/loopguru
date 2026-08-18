@@ -75,8 +75,11 @@ docker compose up --build
 Startup order is handled automatically: `postgres`/`qdrant`/`rabbitmq` become healthy →
 `migrate` runs `alembic upgrade head` once → `api`, `worker`, `beat` start.
 
-- API + Swagger UI: <http://localhost:8000/docs>
-- Health: <http://localhost:8000/health>, readiness: <http://localhost:8000/health/ready>
+- API + Swagger UI: <http://localhost:8899/docs>
+- Health: <http://localhost:8899/health>, readiness: <http://localhost:8899/health/ready>
+
+> Host ports (mapped in `docker-compose.yml`, chosen to avoid clashes):
+> API `8899`→8000, Qdrant `6399`→6333, Postgres `5544`→5432. Change them there if needed.
 
 Data persists in named volumes `pgdata`, `qdrantdata`, `rabbitmqdata` across restarts.
 
@@ -85,17 +88,44 @@ Data persists in named volumes `pgdata`, `qdrantdata`, `rabbitmqdata` across res
 Trigger a backfill immediately (otherwise the daily sweep at 02:00 UTC bootstraps it):
 
 ```bash
-curl -X POST http://localhost:8000/admin/backfill \
+curl -X POST http://localhost:8899/admin/backfill \
   -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" -d '{}'
 ```
 
 Watch progress: `GET /admin/sync-status` (with the `X-API-Key` header). Then:
 
 ```bash
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:8899/query \
   -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
   -d '{"question": "How do I set up X?"}'
 ```
+
+## 6b. Use the CLI (optional, nicer than curl)
+
+Stateless CLI over the same API (`app/cli`). From a host venv (`pip install -r
+requirements.txt`) or inside the `api` container:
+
+```bash
+export LOOPGURU_API_URL=http://localhost:8899        # inside container: http://localhost:8000
+export LOOPGURU_API_KEY="$API_KEY"
+
+python -m app.cli query "how do I set up the UAT?"
+python -m app.cli ask                              # interactive (each question independent)
+python -m app.cli ingest --file steps.md --title "UAT setup"   # index a local doc, no Slack
+python -m app.cli status
+```
+
+Test the how-to capability without Slack: `ingest` a local steps doc, then `query` it.
+
+## 6c. Inspecting the data (verify where things went)
+
+- **Qdrant (embeddings)** — browser dashboard: <http://localhost:6399/dashboard>
+  (collection `knowledge_text-embedding-3-small_v1`). Or:
+  `curl -s http://localhost:6399/collections/knowledge_text-embedding-3-small_v1`.
+- **Postgres (registry/audit)** — connect a GUI to `localhost:5544` (user `loopguru`, pass
+  `loopguru`, db `loopguru`), or:
+  `docker compose exec postgres psql -U loopguru -d loopguru`, then `\dt` and
+  `SELECT * FROM documents;`, `... files;`, `... ingestion_runs;`, `... query_audit;`.
 
 ## 7. Local dev without Docker (optional)
 
@@ -135,7 +165,7 @@ Append here as things are added.
 
 - **Python deps:** see `requirements.txt` (fastapi, uvicorn, pydantic, sqlalchemy,
   psycopg2-binary, alembic, celery, qdrant-client, openai, tiktoken, slack_sdk, httpx,
-  pypdf, python-docx, tenacity).
+  pypdf, python-docx, **PyMuPDF** (scanned-PDF rasterization for vision), tenacity).
 - **Container images:** `postgres:16`, `qdrant/qdrant:v1.12.4`, `rabbitmq:3.13-management`,
   `python:3.12-slim` (app image).
 - **External downloads:** the Slack app manifest (`slack_app_manifest.yaml`) is used to
@@ -143,8 +173,8 @@ Append here as things are added.
 
 ## Known limitations to keep in mind
 
-- **Scanned/image PDFs are not OCR'd** → extraction fails and the file is logged, not
-  indexed.
+- **Images & scanned/image PDFs ARE now OCR'd** via the vision model (`ENABLE_VISION=true`,
+  `VISION_MODEL`). Set `ENABLE_VISION=false` to skip images (saves vision-API cost).
 - **External/hosted files** (Google Drive/Box links that aren't uploaded to Slack) are
   skipped-and-logged.
 - **Deleted messages** are purged on the weekly reconcile (not instantly).

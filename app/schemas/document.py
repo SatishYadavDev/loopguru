@@ -16,6 +16,8 @@ class FileRef:
     is_external: bool
     url_private_download: str | None
     downloadable: bool  # not external AND has a private download url
+    url_private: str | None = None
+    is_canvas: bool = False  # Slack Canvas / quip doc (content is HTML at url_private)
 
 
 @dataclass

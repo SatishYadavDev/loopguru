@@ -174,7 +174,16 @@ class SlackConnector:
         author = self.names.get(msg.get("user", ""), msg.get("user", ""))
         permalink = build_permalink(self.subdomain, channel_id, ts, thread_ts)
         text = message_text(msg, self.names, self.names)
-        files = msg.get("files", []) or []
+        # Files can be direct uploads (msg.files) OR inside a shared/forwarded message's
+        # attachments (attachments[].files). Collect both, deduped by file id.
+        files: list[dict] = list(msg.get("files", []) or [])
+        for att in msg.get("attachments", []) or []:
+            files.extend(att.get("files", []) or [])
+        _seen_ids: set[str] = set()
+        files = [
+            f for f in files
+            if f.get("id") and not (f["id"] in _seen_ids or _seen_ids.add(f["id"]))
+        ]
 
         file_errors: list[dict] = []
         docs: list[Document] = []

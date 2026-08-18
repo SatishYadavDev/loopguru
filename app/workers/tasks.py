@@ -98,6 +98,62 @@ def weekly_reconcile() -> None:
             sweep_scope.delay(channel_id)
 
 
+@celery_app.task(name="app.workers.tasks.handle_mention", bind=True, max_retries=1)
+def handle_mention(self, event: dict) -> None:
+    """Answer an @mention with the agentic loop (thread memory + tools); reply in-thread."""
+    import re
+
+    from app.connectors.slack.client import SlackClient
+    from app.connectors.slack.connector import SlackConnector
+    from app.connectors.slack.normalizer import message_text
+    from app.slackbot.agent import run_agent
+
+    new_correlation_id()
+    channel = event.get("channel", "")
+    thread_ts = event.get("thread_ts") or event.get("ts")  # reply stays in a thread
+    try:
+        conn = SlackConnector()
+        conn.prepare()
+        lines = []
+        if event.get("thread_ts"):  # established thread → full transcript = memory
+            for m in conn.client.paginate(
+                "conversations_replies", "messages", channel=channel, ts=event["thread_ts"]
+            ):
+                t = re.sub(r"<@[^>]+>", "", message_text(m, conn.names, conn.names)).strip()
+                if t:
+                    who = "assistant" if m.get("bot_id") else conn.names.get(m.get("user", ""), "user")
+                    lines.append(f"{who}: {t}")
+        else:  # top-level mention → just this message
+            t = re.sub(r"<@[^>]+>", "", message_text(event, conn.names, conn.names)).strip()
+            lines.append(f"user: {t}")
+        reply = run_agent(channel, thread_ts, "\n".join(lines))
+    except Exception as e:  # noqa: BLE001
+        log.warning("mention handling failed", extra={"error": str(e)})
+        reply = "Sorry, I hit an error handling that. Please try again."
+    try:
+        SlackClient().call("chat_postMessage", channel=channel, thread_ts=thread_ts, text=reply)
+    except Exception as e:  # noqa: BLE001
+        log.error("failed to post Slack reply", extra={"error": str(e)})
+
+
+@celery_app.task(name="app.workers.tasks.channel_digest")
+def channel_digest(days: int = 1) -> None:
+    """Generate a digest per channel and deliver via the alert webhook (Slack posting is
+    pending `chat:write`). On-demand digests are also available at POST /summarize/channel.
+    """
+    new_correlation_id()
+    from app.rag.summarizer import summarize_channel
+
+    label = "Daily" if days == 1 else f"{days}-day"
+    for channel_id in settings.slack_channels:
+        try:
+            s = summarize_channel(channel_id, days)
+        except Exception as e:  # noqa: BLE001
+            log.warning("digest failed", extra={"scope_id": channel_id, "error": str(e)})
+            continue
+        send_alert(f"*{label} digest — {channel_id}* ({s.item_count} items)\n{s.summary}")
+
+
 @celery_app.task(name="app.workers.tasks.check_stale_scopes")
 def check_stale_scopes() -> None:
     """Alert when a scope has had no successful run in > STALE_SCOPE_ALERT_DAYS (PRD §17)."""

@@ -13,6 +13,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.vision import describe_image, is_image, pdf_to_text_via_vision
 from app.schemas.document import FileRef
 
 log = get_logger(__name__)
@@ -32,14 +33,21 @@ class FileSkip(Exception):
 def file_ref_from_slack(f: dict) -> FileRef:
     is_external = bool(f.get("is_external", False))
     dl = f.get("url_private_download")
+    url_private = f.get("url_private")
+    mime = (f.get("mimetype", "") or "")
+    is_canvas = mime == "application/vnd.slack-docs" or f.get("filetype") == "quip" or f.get("mode") == "quip"
+    # canvases have no download url but their content is HTML at url_private
+    downloadable = (not is_external) and bool(dl or (is_canvas and url_private))
     return FileRef(
         file_id=f.get("id", ""),
         name=f.get("name", "") or "",
-        mime=f.get("mimetype", "") or "",
+        mime=mime,
         size=int(f.get("size", 0) or 0),
         is_external=is_external,
         url_private_download=dl,
-        downloadable=(not is_external and bool(dl)),
+        downloadable=downloadable,
+        url_private=url_private,
+        is_canvas=is_canvas,
     )
 
 
@@ -86,28 +94,67 @@ def _extract_text(data: bytes) -> str:
     return data.decode("utf-8", errors="replace").strip()
 
 
+def _html_to_text(html_str: str) -> str:
+    import html as _html
+    import re
+
+    s = re.sub(r"(?i)<(br|/p|/h[1-6]|/li|/tr)\s*/?>", "\n", html_str)
+    s = re.sub(r"(?i)<li[^>]*>", "\n- ", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\n{3,}", "\n\n", _html.unescape(s)).strip()
+
+
+def _canvas_text(ref: FileRef) -> str:
+    url = ref.url_private or ref.url_private_download
+    if not url:
+        raise FileSkip(f"canvas {ref.file_id} has no content url")
+    headers = {"Authorization": f"Bearer {settings.slack_bot_token}"}
+    with httpx.Client(timeout=settings.openai_timeout_s) as client:
+        resp = client.get(url, headers=headers, follow_redirects=True)
+    resp.raise_for_status()
+    return _html_to_text(resp.text)
+
+
 def extract_file_text(ref: FileRef) -> str:
     """Download + extract. Returns text; raises FileSkip when unsupported/undownloadable.
 
-    Empty text from a supported type raises FileSkip too (treated as a failure, not
-    a silent success), so `extracted_ok` is only set when we actually got content.
+    Images (and scanned/text-less PDFs) go through the vision model when ENABLE_VISION.
+    Empty text from a supported type raises FileSkip (treated as a failure, not a silent
+    success), so `extracted_ok` is only set when we actually got content.
     """
     mime = (ref.mime or "").lower()
-    if not any(mime.startswith(p) for p in SUPPORTED_MIME_PREFIXES):
-        # fall back to extension sniffing for md/txt without a mime
-        name = ref.name.lower()
-        if not (name.endswith(".md") or name.endswith(".txt")):
-            raise FileSkip(f"unsupported mime '{mime}' for {ref.name}")
+    name = ref.name.lower()
+
+    # Slack Canvas / quip doc: content is HTML at url_private (no new scope needed).
+    if ref.is_canvas:
+        text = _canvas_text(ref)
+        if not text.strip():
+            raise FileSkip(f"empty canvas {ref.name}")
+        return text
+
+    image = is_image(mime, name)
+    text_supported = any(mime.startswith(p) for p in SUPPORTED_MIME_PREFIXES) or name.endswith(
+        (".md", ".txt")
+    )
+    if not (image or text_supported):
+        raise FileSkip(f"unsupported mime '{mime}' for {ref.name}")
 
     data = _download(ref)
 
-    if mime.startswith("application/pdf"):
+    if image:
+        if not settings.enable_vision:
+            raise FileSkip(f"vision disabled; skipping image {ref.name}")
+        text = describe_image(data, mime or "image/png")
+    elif mime.startswith("application/pdf"):
         text = _extract_pdf(data)
-    elif mime.endswith("wordprocessingml.document") or ref.name.lower().endswith(".docx"):
+        if not text.strip() and settings.enable_vision:
+            log.info("pdf has no text layer; using vision", extra={"file": ref.name})
+            text = pdf_to_text_via_vision(data)
+    elif mime.endswith("wordprocessingml.document") or name.endswith(".docx"):
         text = _extract_docx(data)
     else:
         text = _extract_text(data)
 
     if not text.strip():
-        raise FileSkip(f"empty extraction for {ref.name} (scanned/image? no OCR)")
+        raise FileSkip(f"empty extraction for {ref.name}")
     return text

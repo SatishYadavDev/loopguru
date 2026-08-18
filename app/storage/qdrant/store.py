@@ -75,6 +75,18 @@ class QdrantStore:
                     field_schema=schema,
                 )
         self._ensure_alias()
+        self._ensure_text_index()
+
+    def _ensure_text_index(self) -> None:
+        """Full-text index on chunk_text for BM25/keyword search (idempotent)."""
+        try:
+            self.client.create_payload_index(
+                collection_name=self.concrete,
+                field_name="chunk_text",
+                field_schema=qm.PayloadSchemaType.TEXT,
+            )
+        except Exception:  # noqa: BLE001 - already exists / older server; keyword search degrades gracefully
+            pass
 
     def _ensure_alias(self) -> None:
         aliases = {a.alias_name: a.collection_name for a in self.client.get_aliases().aliases}
@@ -162,23 +174,18 @@ class QdrantStore:
 
     # ---- reads -------------------------------------------------------------
 
-    def search(
-        self,
-        vector: list[float],
-        limit: int,
-        source: str | None = None,
-        scope_id: str | None = None,
-        since_epoch: int | None = None,
-    ) -> list[RetrievedChunk]:
-        must: list = []
+    def _filter(
+        self, source: str | None, scope_id: str | None, since_epoch: int | None,
+        extra_must: list | None = None,
+    ) -> "qm.Filter | None":
+        must: list = list(extra_must or [])
         if source:
             must.append(qm.FieldCondition(key="source", match=qm.MatchValue(value=source)))
         if since_epoch:
             must.append(
                 qm.FieldCondition(key="created_epoch", range=qm.Range(gte=since_epoch))
             )
-        # scope filter must match message docs (scope_id) OR file docs (scope_ids).
-        # A nested Filter with only `should` matches when >=1 sub-condition matches.
+        # scope filter matches message docs (scope_id) OR file docs (scope_ids).
         if scope_id:
             must.append(
                 qm.Filter(
@@ -188,7 +195,51 @@ class QdrantStore:
                     ]
                 )
             )
-        query_filter = qm.Filter(must=must) if must else None
+        return qm.Filter(must=must) if must else None
+
+    def keyword_search(
+        self,
+        text: str,
+        limit: int,
+        source: str | None = None,
+        scope_id: str | None = None,
+        since_epoch: int | None = None,
+    ) -> list[RetrievedChunk]:
+        """Full-text (keyword) recall over chunk_text — complements vector search so exact
+        terms/acronyms aren't missed. Unscored here (score 0); ranking is done by the
+        caller's BM25 + RRF fusion.
+        """
+        query_filter = self._filter(
+            source, scope_id, since_epoch,
+            extra_must=[qm.FieldCondition(key="chunk_text", match=qm.MatchText(text=text))],
+        )
+        points, _ = self.client.scroll(
+            collection_name=self.alias,
+            scroll_filter=query_filter,
+            with_payload=True,
+            with_vectors=True,
+            limit=limit,
+        )
+        return [
+            RetrievedChunk(
+                doc_id=p.payload.get("doc_id", ""),
+                chunk_idx=int(p.payload.get("chunk_idx", 0)),
+                score=0.0,
+                payload=p.payload,
+                vector=list(p.vector) if isinstance(p.vector, (list, tuple)) else None,
+            )
+            for p in points
+        ]
+
+    def search(
+        self,
+        vector: list[float],
+        limit: int,
+        source: str | None = None,
+        scope_id: str | None = None,
+        since_epoch: int | None = None,
+    ) -> list[RetrievedChunk]:
+        query_filter = self._filter(source, scope_id, since_epoch)
 
         hits = self.client.search(
             collection_name=self.alias,
@@ -208,6 +259,20 @@ class QdrantStore:
             )
             for h in hits
         ]
+
+    def fetch_recent(
+        self, scope_id: str, since_epoch: int, limit: int = 1000
+    ) -> list[dict]:
+        """Payloads for a scope's chunks since `since_epoch` (for channel digests)."""
+        query_filter = self._filter(source=None, scope_id=scope_id, since_epoch=since_epoch)
+        points, _ = self.client.scroll(
+            collection_name=self.alias,
+            scroll_filter=query_filter,
+            with_payload=True,
+            with_vectors=False,
+            limit=limit,
+        )
+        return [p.payload for p in points]
 
     def fetch_doc_chunks(self, doc_id: str, limit: int = 64) -> list[RetrievedChunk]:
         """Fetch all stored chunks for a doc (context expansion, PRD §14.6)."""

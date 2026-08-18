@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from app.api.errors import register_error_handlers
-from app.api.routers import admin, health, query
+from app.api.routers import admin, health, query, slack_events, summarize, ticket
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger, new_correlation_id
 
@@ -53,5 +53,8 @@ def _startup() -> None:
 
 
 app.include_router(health.router)
+app.include_router(slack_events.router)
 app.include_router(query.router)
+app.include_router(summarize.router)
+app.include_router(ticket.router)
 app.include_router(admin.router)

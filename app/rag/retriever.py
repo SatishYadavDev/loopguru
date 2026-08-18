@@ -1,17 +1,67 @@
-"""Retrieval: over-fetch → dedup → recency reorder → neighbor expansion →
-token-budgeted context assembly (PRD §14.3–§14.8).
+"""Retrieval: hybrid (vector + BM25/keyword, fused by RRF) → dedup → recency reorder →
+neighbor expansion → token-budgeted context assembly (PRD §14.3–§14.8).
 """
 
 from __future__ import annotations
 
 import math
+import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 
 from app.core.config import settings
 from app.core.tokens import count_tokens, truncate_tokens
 from app.schemas.query import QueryRequest
 from app.storage.qdrant.store import QdrantStore, RetrievedChunk
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize(text: str) -> list[str]:
+    return _WORD.findall((text or "").lower())
+
+
+def _bm25_scores(query: str, docs: list[list[str]], k1: float = 1.5, b: float = 0.75) -> list[float]:
+    """Classic BM25 over a small candidate set (the retrieved pool)."""
+    n = len(docs)
+    if n == 0:
+        return []
+    avgdl = (sum(len(d) for d in docs) / n) or 1.0
+    df: Counter = Counter()
+    for d in docs:
+        for term in set(d):
+            df[term] += 1
+    q_terms = set(_tokenize(query))
+    scores: list[float] = []
+    for d in docs:
+        tf = Counter(d)
+        dl = len(d) or 1
+        s = 0.0
+        for term in q_terms:
+            f = tf.get(term, 0)
+            if not f:
+                continue
+            idf = math.log(1 + (n - df[term] + 0.5) / (df[term] + 0.5))
+            s += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl))
+        scores.append(s)
+    return scores
+
+
+def _rrf_fuse(candidates: list[RetrievedChunk], query: str, k: int) -> None:
+    """Reciprocal Rank Fusion of vector rank (current .score = cosine) and BM25 rank.
+    Overwrites each candidate's .score with the fused score (used for ordering only).
+    """
+    n = len(candidates)
+    if n == 0:
+        return
+    vec_order = sorted(range(n), key=lambda i: candidates[i].score, reverse=True)
+    vrank = {i: r for r, i in enumerate(vec_order)}
+    bm = _bm25_scores(query, [_tokenize(c.text) for c in candidates])
+    bm_order = sorted(range(n), key=lambda i: bm[i], reverse=True)
+    brank = {i: r for r, i in enumerate(bm_order)}
+    for i, c in enumerate(candidates):
+        c.score = 1.0 / (k + vrank[i]) + 1.0 / (k + brank[i])
 
 
 @dataclass
@@ -35,6 +85,14 @@ def _cosine(a: list[float] | None, b: list[float] | None) -> float:
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     return dot / (na * nb) if na and nb else 0.0
+
+
+def _clean_snippet(text: str, max_chars: int = 200) -> str:
+    """A short, human-readable preview: collapse whitespace, cut at a word boundary, add …."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= max_chars:
+        return flat
+    return flat[:max_chars].rsplit(" ", 1)[0].rstrip() + " …"
 
 
 def _recency_factor(created_epoch: int, now: float) -> float:
@@ -93,17 +151,38 @@ def retrieve(store: QdrantStore, query_vector: list[float], req: QueryRequest) -
     top_k = req.top_k or settings.rag_top_k
     overfetch = max(settings.rag_overfetch_k, top_k)
     f = req.filters
-    hits = store.search(
-        query_vector,
-        overfetch,
-        source=f.source if f else None,
-        scope_id=f.scope_id if f else None,
-        since_epoch=f.since_epoch if f else None,
-    )
+    src = f.source if f else None
+    scope = f.scope_id if f else None
+    since = f.since_epoch if f else None
+
+    vhits = store.search(query_vector, overfetch, src, scope, since)
+    khits: list[RetrievedChunk] = []
+    if settings.rag_hybrid:
+        try:
+            khits = store.keyword_search(req.question, overfetch, src, scope, since)
+        except Exception:  # noqa: BLE001 - keyword index may be absent; vector-only still works
+            khits = []
+
+    # union candidates by (doc_id, chunk_idx), preferring the vector hit (has cosine score)
+    cand: dict[tuple[str, int], RetrievedChunk] = {}
+    for h in vhits:
+        cand[(h.doc_id, h.chunk_idx)] = h
+    for h in khits:
+        cand.setdefault((h.doc_id, h.chunk_idx), h)
+    hits = list(cand.values())
     if not hits:
         return RetrievalResult([], 0.0, False)
 
-    best_score = max(h.score for h in hits)
+    # keyword-only candidates arrive unscored — compute their cosine vs the query vector
+    for h in hits:
+        if h.score == 0.0 and h.vector:
+            h.score = _cosine(query_vector, h.vector)
+
+    # relevance floor is calibrated on cosine, so capture it BEFORE fusion overwrites score
+    best_score = max((h.score for h in hits), default=0.0)
+
+    if settings.rag_hybrid and khits:
+        _rrf_fuse(hits, req.question, settings.rag_rrf_k)
 
     hits = _dedup(hits)
     hits = _unique_docs(hits)
@@ -112,9 +191,12 @@ def retrieve(store: QdrantStore, query_vector: list[float], req: QueryRequest) -
     hits.sort(key=lambda h: h.score * _recency_factor(h.created_epoch, now), reverse=True)
     hits = hits[:top_k]
 
-    # assemble with token budget
+    # Assemble with an overall token budget. We deliberately do NOT split the budget
+    # evenly across top_k: a long procedural doc (e.g. a multi-section setup guide) must
+    # be allowed to occupy most/all of the budget so its steps arrive complete. Passages
+    # are added in score order and we stop once the budget is exhausted.
     budget = settings.rag_context_token_budget
-    per_passage_cap = max(256, budget // max(1, top_k))
+    per_passage_cap = budget
     passages: list[Passage] = []
     used = 0
     for h in hits:
@@ -134,7 +216,7 @@ def retrieve(store: QdrantStore, query_vector: list[float], req: QueryRequest) -
                 title=h.payload.get("title"),
                 permalink=h.payload.get("permalink"),
                 text=text,
-                snippet=truncate_tokens(h.text, 80).strip(),
+                snippet=_clean_snippet(h.text),
                 created_epoch=h.created_epoch,
                 score=h.score,
             )

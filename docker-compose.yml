@@ -8,6 +8,9 @@ services:
       POSTGRES_USER: loopguru
       POSTGRES_PASSWORD: loopguru
       POSTGRES_DB: loopguru
+    ports:
+      # Host 5544 -> Postgres 5432 (connect a GUI like TablePlus/DBeaver here).
+      - "5544:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -21,6 +24,9 @@ services:
     image: qdrant/qdrant:v1.12.4
     volumes:
       - qdrantdata:/qdrant/storage
+    ports:
+      # Host 6399 -> Qdrant 6333. Browser dashboard: http://localhost:6399/dashboard
+      - "6399:6333"
     # The qdrant image ships no shell/curl, so we don't declare a healthcheck;
     # app services depend on service_started and retry against Qdrant at runtime.
     restart: unless-stopped
@@ -51,7 +57,8 @@ services:
     command: ["python", "-m", "app.api"]
     env_file: .env
     ports:
-      - "8000:8000"
+      # Host 8899 -> container 8000 (host 8000 is used by another local app).
+      - "8899:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -90,7 +97,7 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
-        condition: service_healthy
+        condition: service_started
     mem_limit: 2g
     restart: unless-stopped
 
@@ -106,6 +113,16 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Slack @mention bot over Socket Mode (no public URL). Needs SLACK_APP_TOKEN.
+  slackbot:
+    build: .
+    command: ["python", "-m", "app.slackbot"]
+    env_file: .env
+    depends_on:
       rabbitmq:
         condition: service_healthy
     restart: unless-stopped

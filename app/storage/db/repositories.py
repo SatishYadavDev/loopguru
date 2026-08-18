@@ -362,6 +362,25 @@ def last_success_epoch(session, source: str, scope_id: str) -> float | None:
 # query audit
 # --------------------------------------------------------------------------- #
 
+def get_thread_ticket(session, channel_id: str, thread_ts: str) -> int | None:
+    from app.storage.db.models import ThreadTicket
+
+    row = session.get(ThreadTicket, {"channel_id": channel_id, "thread_ts": thread_ts})
+    return row.work_item_id if row else None
+
+
+def set_thread_ticket(session, channel_id: str, thread_ts: str, work_item_id: int) -> None:
+    from app.storage.db.models import ThreadTicket
+
+    stmt = pg_insert(ThreadTicket).values(
+        channel_id=channel_id, thread_ts=thread_ts, work_item_id=work_item_id, updated_at=_now()
+    ).on_conflict_do_update(
+        index_elements=[ThreadTicket.channel_id, ThreadTicket.thread_ts],
+        set_={"work_item_id": work_item_id, "updated_at": _now()},
+    )
+    session.execute(stmt)
+
+
 def record_query_audit(
     session, *, question: str, top_doc_ids: list[str], used_doc_ids: list[str],
     latency_ms: int,

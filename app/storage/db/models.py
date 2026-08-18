@@ -131,6 +131,19 @@ class IngestionRun(Base):
     errors_json: Mapped[str | None] = mapped_column(Text)
 
 
+class ThreadTicket(Base):
+    """Remembers which Azure work item a Slack thread created (for follow-up edits)."""
+
+    __tablename__ = "thread_tickets"
+
+    channel_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    thread_ts: Mapped[str] = mapped_column(String(32), primary_key=True)
+    work_item_id: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class QueryAudit(Base):
     __tablename__ = "query_audit"
 

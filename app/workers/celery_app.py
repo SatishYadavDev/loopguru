@@ -40,6 +40,17 @@ celery_app.conf.update(
             "task": "app.workers.tasks.check_stale_scopes",
             "schedule": crontab(hour="*/6", minute=15),
         },
+        # Channel digests: daily (last 1 day) + weekly (last 7 days).
+        "daily-digest": {
+            "task": "app.workers.tasks.channel_digest",
+            "schedule": crontab(hour=6, minute=0),
+            "args": (1,),
+        },
+        "weekly-digest": {
+            "task": "app.workers.tasks.channel_digest",
+            "schedule": crontab(hour=6, minute=30, day_of_week=1),  # Mondays
+            "args": (7,),
+        },
     },
 )
 

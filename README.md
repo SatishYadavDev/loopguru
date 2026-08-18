@@ -66,6 +66,56 @@ celery -A app.workers.celery_app:celery_app worker -Q knowledge --loglevel=INFO 
 celery -A app.workers.celery_app:celery_app beat --loglevel=INFO                  # scheduler
 ```
 
+## How answering works (the LLM in the middle)
+
+The agent is **query-based and stateless** — each `/query` is independent, with no
+conversation memory. One request flows:
+
+1. Embed the question (OpenAI) and semantic-search Qdrant (over-fetch → dedup → recency
+   re-rank → expand neighbors → token-budgeted context).
+2. If nothing is relevant enough (below `RAG_RELEVANCE_FLOOR`), it refuses instead of
+   guessing.
+3. Otherwise the **LLM (OpenAI chat)** answers **only from the retrieved context**, with a
+   grounded prompt tuned for procedural / how-to questions: it reproduces steps, commands,
+   paths, and values verbatim and never invents them.
+4. It returns the answer plus **citations** (the exact sources used, with permalinks); a
+   faithfulness check drops any citation the model didn't actually ground on.
+
+So if someone shares a doc like *"Steps to install & set up UAT"* and you ask *"how do I
+set up the UAT?"*, you get the numbered steps back, cited to that doc. Example verified
+end-to-end in this repo.
+
+## CLI
+
+A thin, stateless client over the same REST API (`app/cli`). The easiest entry is the
+**`./loopguru`** launcher (runs the CLI inside the `api` container):
+
+```bash
+./loopguru                                  # interactive slash shell — type /help
+```
+
+Inside the shell: plain text is a question; slash commands do everything else —
+`/ask`, `/summarize channel <id> [days]`, `/summarize thread <channel> <ts>`,
+`/backfill [channel]` (alias `/fill`), `/ingest <text>`, `/ticket <problem>`, `/status`,
+`/purge <doc_id>`, `/help`, `/exit`.
+
+One-shot (scriptable) forms:
+
+```bash
+./loopguru query "how do I set up the UAT?"
+./loopguru summarize channel C0123ABCD --days 7
+./loopguru backfill --channel C0123ABCD
+./loopguru ingest --file steps.md --title "UAT setup guide"    # index a local doc (no Slack)
+./loopguru ticket "users get a 404 navigating Agent → Fund; fix the route"   # draft→confirm→file on Azure
+./loopguru status
+./loopguru purge --doc-id manual:abc123
+```
+
+- Prefer not to use `./loopguru`? Run `python -m app.cli <cmd>` on a host venv with
+  `LOOPGURU_API_URL`/`LOOPGURU_API_KEY` set, or inside the container with `--url http://localhost:8000`.
+- `ingest` indexes a local `.md/.txt/.pdf/.docx` (or `--text`) **without Slack** — handy to
+  test how-to answers immediately (`POST /admin/ingest`, source `manual`).
+
 ## Project layout
 
 ```
@@ -77,6 +127,7 @@ app/
   rag/         retriever, prompt, answerer, service
   storage/     db/ (models, repositories, alembic) + qdrant/ (store)
   workers/     celery app, sync engine, tasks, alerts
+  cli/         stateless CLI client over the REST API (python -m app.cli)
 ```
 
 ## Notes / limitations (v1)

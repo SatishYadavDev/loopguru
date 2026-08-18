@@ -50,8 +50,9 @@ without changing the retrieval or answering core. First run = full backfill; the
 - No per-user / per-channel authorization on answers in v1 (single static API key). The
   channel allowlist MUST therefore contain only content acceptable for all key holders
   (§4, §18).
-- No search-time reranker model (mitigated in §14); no OCR for scanned PDFs; no ingestion
-  of Slack Canvases / Google-Drive-linked files (§4, §9.9).
+- No search-time reranker model (mitigated in §14); no ingestion of Slack Canvases /
+  Google-Drive-linked files (§4, §9.9). **(Update 2026-08-05: image & scanned-PDF OCR via
+  a vision model is now implemented — see §9.9 and §27.)**
 - No automated unit/integration test suite — deferred, revisit later. A small **manual
   calibration/eval gold set** (§23) is still recommended because retrieval tuning is
   otherwise blind.
@@ -275,11 +276,14 @@ Raw Slack text is not plain text. Normalizer must:
   `Authorization: Bearer <bot-token>` (NOT the HTML `permalink`/`url_private`). Guard
   against HTML error responses masquerading as file bytes.
 - Supported MIME allowlist: `application/pdf` (pypdf), `text/markdown`, `text/plain`,
-  `.docx` (python-docx). Everything else skipped-and-logged.
+  `.docx` (python-docx), and **images** `image/png|jpeg|gif|webp` (vision, §27).
+  Everything else skipped-and-logged.
 - **`is_external` / hosted files (Google Drive, Box)** cannot be byte-downloaded →
-  skipped-and-logged (§4.4). **Slack Canvases** and legacy `.doc` are known v1 gaps.
-- `MAX_FILE_BYTES` cap + download timeout; oversize skipped-and-logged. **Empty extraction
-  (e.g. scanned/image PDF, no OCR) counts as a failure, not `extracted_ok`.**
+  skipped-and-logged (§4.4). **Slack Canvases are now ingested** (§27, `url_private` HTML →
+  text via existing `files:read`); legacy `.doc` remains a gap.
+- `MAX_FILE_BYTES` cap + download timeout; oversize skipped-and-logged. Images and
+  text-less/scanned PDFs are routed to the **vision model** (§27); only if that also yields
+  nothing is the file counted as a failure (not `extracted_ok`).
 - Each file → one Document (`slack:file:{file_id}`), deduped across messages; each linking
   message recorded in `file_messages`; the file's `scope_ids` payload lists all channels
   it was shared in.
@@ -553,18 +557,23 @@ start (app/worker/beat never auto-migrate — avoids replica races).
 ## 19. Configuration (`.env`)
 
 **LLM/vector:** `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `EMBEDDING_MODEL`, `CHAT_MODEL`,
+`VISION_MODEL` (gpt-4o-mini), `ENABLE_VISION` (true), `MAX_IMAGE_PAGES` (8),
 `OPENAI_TIMEOUT_S`, `QDRANT_URL`, `QDRANT_COLLECTION` (alias name; default `knowledge`),
 `QDRANT_COLLECTION_VERSION` (int, default 1).
 **Infra:** `DATABASE_URL`, `CELERY_BROKER_URL` (RabbitMQ).
-**Slack:** `SLACK_BOT_TOKEN`, `SLACK_WORKSPACE_SUBDOMAIN` (optional override; auto-derived),
+**Slack:** `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` (@mention bot), `SLACK_BOT_USER_ID`
+(optional), `SLACK_WORKSPACE_SUBDOMAIN` (optional override; auto-derived),
 `SLACK_CHANNELS` (JSON list of channel IDs), `SLACK_CHANNEL_PRIORITY` (JSON, optional —
 ordered channel IDs for backfill ordering; unlisted channels follow), `USEFUL_BOT_IDS`
 (JSON, optional).
 **RAG:** `RAG_TOP_K` (8), `RAG_OVERFETCH_K` (20), `RAG_RELEVANCE_FLOOR` (0.35),
-`RAG_DEDUP_SIM` (0.97), `RAG_RECENCY_HALFLIFE_DAYS` (180), `RAG_EXPAND_MAX_CHUNKS` (6),
-`RAG_CONTEXT_TOKEN_BUDGET`.
+`RAG_DEDUP_SIM` (0.97), `RAG_RECENCY_HALFLIFE_DAYS` (180), `RAG_EXPAND_MAX_CHUNKS` (24),
+`RAG_CONTEXT_TOKEN_BUDGET` (12000).
 **Ingestion:** `SYNC_OVERLAP_DAYS` (2), `REPLY_POLL_BATCH`, `EMBED_BATCH_SIZE`,
 `MAX_FILE_BYTES`, `MAX_QUESTION_CHARS`.
+**Azure (optional, ticket action):** `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PROJECT`,
+`AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_WORKITEM_TYPE` (default Task), `AZURE_DEVOPS_ASSIGNED_TO`
+(required by some project rules).
 **API/ops:** `API_KEY`, `API_RATE_LIMIT` (e.g. `60/minute`), `MAX_REQUEST_BYTES`,
 `ALERT_WEBHOOK_URL`, `STALE_SCOPE_ALERT_DAYS`.
 
@@ -578,8 +587,9 @@ ordered channel IDs for backfill ordering; unlisted channels follow), `USEFUL_BO
   added. It MUST include: Docker/Compose install; creating the Slack app **from the shipped
   manifest**; the exact **scope list**; how to **invite the bot** to each allowlisted
   channel; how to **find channel IDs**; OpenAI/Azure key acquisition + `OPENAI_BASE_URL`;
-  the note that **scanned PDFs aren't OCR'd** (logged as extraction failure) and external/
-  Drive files are skipped; the **one-shot migrate** command; backup/restore steps (§21).
+  the note that **images & scanned PDFs are OCR'd via the vision model** (`ENABLE_VISION`)
+  and external/Drive-linked files are skipped; the **one-shot migrate** command;
+  backup/restore steps (§21).
 
 ---
 
@@ -680,3 +690,97 @@ loopguru/
 - **Azure:** `AzureConnector` — boards as scopes; tickets/bugs as RawItems.
 - Neither requires changes to ingestion, RAG, storage, or the API — only a new connector +
   its config.
+
+---
+
+## 27. Changelog (post-v1 changes)
+
+Newest first. Keep this in sync with `FEATURES.md`'s Progress log.
+
+### 2026-08-18 — Agentic Slack bot (thread memory + tools) ✅ done
+- `app/slackbot/agent.py`: an OpenAI tool-calling loop replaces first-word routing. The
+  bot passes the full thread transcript as memory and exposes tools `answer_question`,
+  `summarize_thread`, `summarize_channel`, `create_ticket`, `update_ticket`. Enables
+  follow-ups and iterative ticket edits in a thread. New table `thread_tickets`
+  (migration `0002`) maps a thread → its Azure work item; `AzureBoardsClient.update_work_item`
+  (PATCH) added. Handler (`handle_mention`) builds the transcript and calls `run_agent`.
+
+### 2026-08-18 — Slack @mention bot ✅ (code) done
+- `POST /slack/events` (`app/api/routers/slack_events.py`): HMAC signature verification
+  with `SLACK_SIGNING_SECRET`, url_verification handshake, fast-ACK; `app_mention` events
+  are handed to Celery `handle_mention`, which routes to query/summarize/ticket and replies
+  in-thread via `chat.postMessage`. Questions are scoped to the mention's channel. New
+  config: `SLACK_SIGNING_SECRET`, `SLACK_BOT_USER_ID`; new scopes `chat:write`,
+  `app_mentions:read`. This supersedes the "REST API only" interface note (§5).
+- Pending (owner): set the Event Subscription Request URL to `<public-url>/slack/events`
+  and subscribe `app_mention`. Real-time message ingestion via Events API is still future.
+
+### 2026-08-10 — Slack Canvas ingestion ✅ done
+- Canvas files (`application/vnd.slack-docs` / `quip`) carry content as HTML at
+  `url_private`; `files.py` detects them (`FileRef.is_canvas`), downloads with the existing
+  `files:read` scope (no reinstall), and strips HTML → text (`_canvas_text`). Indexed like
+  any file. Note: unscoped retrieval can be diluted by other channels' volume — scope the
+  query or purge stale channels.
+
+### 2026-08-10 — Azure Boards ticket (action) ✅ done
+- `app/connectors/azure/boards.py` (`AzureBoardsClient.create_work_item`, REST
+  `POST .../_apis/wit/workitems/${type}`, Basic auth with PAT). `app/rag/ticket_drafter.py`
+  drafts `{title, description_html, acceptance criteria, tags}` from a problem statement,
+  enriched with retrieved Slack context. Endpoints `POST /ticket/draft` + `/ticket/create`;
+  CLI `/ticket` (shell) / `loopguru ticket` with a confirm step. Config:
+  `AZURE_DEVOPS_ORG/PROJECT/PAT`, `AZURE_DEVOPS_WORKITEM_TYPE` (default Task).
+- Draft verified end-to-end; the actual create is run by the user (outward write to a
+  shared board). This realizes the Azure connector anticipated in §26.
+- CLI: the AI **always drafts** the ticket; each flag
+  (`--title/--description/--type/--assignee/--tags`, any order) **overrides just that
+  field**, unset fields keep the AI value / configured default. `System.AssignedTo` set
+  from `AZURE_DEVOPS_ASSIGNED_TO` or `--assignee` (some project processes require it —
+  `TF401320` otherwise).
+
+### 2026-08-07 — CLI overhaul ✅ done
+- `./loopguru` launcher (runs the CLI inside the api container) opens an interactive slash
+  shell: plain text = a question; `/help`, `/ask`, `/summarize channel|thread`,
+  `/backfill` (`/fill`), `/ingest`, `/status`, `/purge`, `/exit`. Clean ANSI formatting,
+  auto-disabled when not a TTY. One-shot subcommands retained for scripting.
+
+### 2026-08-07 — Summaries & digests ✅ done
+- `app/rag/summarizer.py`: `summarize_thread()` (live `conversations.replies`) and
+  `summarize_channel()` (reads Qdrant chunks via `store.fetch_recent()`, no extra Slack
+  calls). Endpoints `POST /summarize/thread` and `POST /summarize/channel`.
+- Celery Beat `channel_digest(days)` scheduled daily (1) + weekly (7); delivered via the
+  alert webhook. Posting digests back into Slack is pending `chat:write`.
+
+### 2026-08-07 — Hybrid retrieval (BM25 + vector) ✅ done
+- `store.keyword_search()` (Qdrant full-text `MatchText` on a `chunk_text` TEXT index) +
+  vector search are unioned and fused via **RRF** using an in-process **BM25** rank
+  (`retriever._bm25_scores`, `_rrf_fuse`). Cosine is still used for the relevance-floor
+  gate; RRF only reorders. New config: `RAG_HYBRID`, `RAG_RRF_K`.
+- This supersedes the "no reranker in v1" note for keyword/acronym matching.
+
+### 2026-08-05 — Image & diagram OCR (vision) ✅ done
+- New `app/core/vision.py`: `describe_image()` transcribes/describes an image via the
+  OpenAI **vision** model; `pdf_to_text_via_vision()` rasterizes scanned/text-less PDFs
+  with **PyMuPDF** and runs vision per page (capped by `MAX_IMAGE_PAGES`).
+- `connectors/slack/files.py` now routes `image/*` files to vision, and falls back to
+  vision when a PDF has no text layer. New config: `ENABLE_VISION`, `VISION_MODEL`,
+  `MAX_IMAGE_PAGES`. New dep: `PyMuPDF`.
+- Verified **end-to-end**: a "Yield to Maturity" image posted in Slack was OCR'd, indexed,
+  and answered with a citation.
+- Bug fix (same day): shared/forwarded messages expose files under `attachments[].files`,
+  not `msg.files`; the connector now collects both (deduped) so forwarded files index too.
+
+### 2026-08-05 — Retrieval tuning ✅ done
+- `RAG_EXPAND_MAX_CHUNKS` 6 → **24**, `RAG_CONTEXT_TOKEN_BUDGET` 6000 → **12000**, and the
+  per-passage cap no longer divides the budget by top_k — so long procedural docs return
+  complete step-by-step answers.
+
+### Pending (need user-provided inputs)
+- **Azure Boards ticket action** — CLI drafts + files a work item on Azure DevOps
+  (needs `AZURE_DEVOPS_ORG` / `PROJECT` / `PAT`).
+- **Slack `@mention` bot + real-time sync** — needs Slack Events API app config + a public
+  webhook URL (and `chat:write` scope re-added).
+
+### Planned (no external dependency)
+- Thread summaries + scheduled daily/weekly channel digests.
+- Hybrid retrieval: combine **BM25 keyword** scoring with vector cosine (better exact-term
+  and acronym matches, e.g. "YTM").
