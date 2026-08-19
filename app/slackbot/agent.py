@@ -22,6 +22,11 @@ _SYSTEM = (
     "earlier turns (e.g. 'explain in one line', 'change the assignee', 'set the title'). "
     "Choose and call the right tool:\n"
     "- answer_question: any factual / how-to question about internal knowledge.\n"
+    "- find_discussions: when the user asks WHERE something was discussed, to 'share that "
+    "thread', or whether an example / sample / link / doc exists (e.g. 'was this discussed "
+    "before? share it', 'koi payable funds ka example/link hai kya?') — returns matching "
+    "Slack thread & file links (no answer text, just the links). Prefer this over "
+    "answer_question when the user wants the SOURCE/thread itself, not an explanation.\n"
     "- summarize_thread / summarize_channel: summaries.\n"
     "- create_ticket: file an Azure Boards ticket (omit title/description to draft them "
     "from the thread).\n"
@@ -47,6 +52,12 @@ _TOOLS = [
         "description": "Answer a question using the org's internal knowledge (Slack docs/messages).",
         "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
                        "required": ["question"]}}},
+    {"type": "function", "function": {
+        "name": "find_discussions",
+        "description": ("Find Slack threads/files where a topic was discussed or an example/link "
+                        "exists. Returns links only (no generated answer)."),
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}},
+                       "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "summarize_thread", "description": "Summarize the current thread.",
         "parameters": {"type": "object", "properties": {}}}},
@@ -89,12 +100,23 @@ def _make_tools(channel: str, thread_ts: str | None, transcript: str) -> dict:
     def answer_question(question: str = "") -> str:
         from app.rag.service import answer_query
         from app.schemas.query import QueryFilters, QueryRequest
+        from app.slackbot.formatting import format_answer
 
         r = answer_query(QueryRequest(question=question, filters=QueryFilters(scope_id=channel)))
-        src = "\n".join(
-            f"- <{c.permalink}|{c.title or 'source'}>" for c in r.citations if c.permalink
+        return format_answer(r)
+
+    def find_discussions(query: str = "", **_) -> str:
+        from app.rag.service import find_sources
+
+        hits = find_sources(query, scope_id=channel, limit=3)
+        if not hits:
+            return "I couldn't find any prior thread or file about that."
+        links = "\n".join(
+            f"- <{h.permalink}|{h.title or 'discussion'}>"
+            + (f" ({h.age_days}d ago)" if h.age_days else "")
+            for h in hits
         )
-        return r.answer + (f"\n\nSources:\n{src}" if src else "")
+        return f"Here's where this shows up:\n{links}"
 
     def summarize_thread(**_) -> str:
         from app.rag.summarizer import summarize_thread as st
@@ -210,6 +232,7 @@ def _make_tools(channel: str, thread_ts: str | None, transcript: str) -> dict:
 
     return {
         "answer_question": answer_question,
+        "find_discussions": find_discussions,
         "summarize_thread": summarize_thread,
         "summarize_channel": summarize_channel,
         "create_ticket": create_ticket,

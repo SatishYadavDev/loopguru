@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -17,6 +18,24 @@ from app.schemas.query import Citation
 log = get_logger(__name__)
 
 INSUFFICIENT = "I don't have relevant internal information to answer that."
+
+_MD_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+_BARE_URL = re.compile(r"https?://[^\s)>\]]+")
+
+
+def _strip_fabricated_urls(text: str, passages: list[Passage]) -> str:
+    """Remove any URL the model wrote that is NOT present verbatim in the context.
+
+    The only trustworthy links are the citations the system attaches; the model must never
+    invent a URL (e.g. https://example.com/…). Markdown links keep their visible label.
+    """
+    corpus = "\n".join(p.text for p in passages)
+    text = _MD_LINK.sub(lambda m: m.group(0) if m.group(2) in corpus else m.group(1), text)
+    text = _BARE_URL.sub(lambda m: m.group(0) if m.group(0) in corpus else "", text)
+    # tidy leftovers like "linked here: ()" / "see: ." after a URL was removed
+    text = re.sub(r"\(\s*\)", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
 
 
 @dataclass
@@ -74,6 +93,8 @@ def answer_question(question: str, passages: list[Passage]) -> Answer:
     if not valid:
         # answer with no real citation → downgrade
         return Answer(INSUFFICIENT, [], [])
+
+    text = _strip_fabricated_urls(text, passages)  # kill any hallucinated link
 
     citations = [
         Citation(

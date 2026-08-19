@@ -58,4 +58,13 @@ async def slack_events(request: Request) -> dict:
         from app.workers.tasks import handle_mention
 
         handle_mention.delay(event)
+        return {"ok": True}
+
+    # Ambient path: un-mentioned messages, replied to only when the bot is confident.
+    from app.slackbot.passive import should_consider
+
+    if should_consider(event):
+        from app.workers.tasks import handle_passive_message
+
+        handle_passive_message.delay(event)
     return {"ok": True}

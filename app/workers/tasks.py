@@ -131,9 +131,51 @@ def handle_mention(self, event: dict) -> None:
         log.warning("mention handling failed", extra={"error": str(e)})
         reply = "Sorry, I hit an error handling that. Please try again."
     try:
-        SlackClient().call("chat_postMessage", channel=channel, thread_ts=thread_ts, text=reply)
+        SlackClient().call("chat_postMessage", channel=channel, thread_ts=thread_ts, text=reply,
+                           unfurl_links=False, unfurl_media=False)
     except Exception as e:  # noqa: BLE001
         log.error("failed to post Slack reply", extra={"error": str(e)})
+
+
+@celery_app.task(name="app.workers.tasks.handle_passive_message", bind=True, max_retries=0)
+def handle_passive_message(self, event: dict) -> None:
+    """Un-mentioned message → answer in-thread ONLY if confident, else stay silent."""
+    from app.connectors.slack.client import SlackClient
+    from app.rag.answerer import INSUFFICIENT
+    from app.rag.service import answer_query
+    from app.schemas.query import QueryFilters, QueryRequest
+    from app.slackbot.formatting import format_answer
+    from app.slackbot.passive import should_consider, strip_mentions
+
+    new_correlation_id()
+    if not should_consider(event):  # re-check: state/config may have changed since enqueue
+        return
+    channel = event.get("channel", "")
+    ts = event.get("ts")
+    question = strip_mentions(event.get("text") or "")
+    if not question:
+        return
+    try:
+        resp = answer_query(QueryRequest(
+            question=question,
+            filters=QueryFilters(scope_id=channel),
+            min_score=settings.passive_confidence_floor,
+        ))
+    except Exception as e:  # noqa: BLE001
+        log.warning("passive answer failed", extra={"error": str(e)})
+        return
+
+    # Not confident enough (below the raised floor, or nothing relevant) → silent.
+    if resp.answer == INSUFFICIENT or not resp.citations:
+        log.info("passive: staying silent", extra={"scope_id": channel, "score": resp.best_score})
+        return
+
+    reply = format_answer(resp)
+    try:
+        SlackClient().call("chat_postMessage", channel=channel, thread_ts=ts, text=reply,
+                           unfurl_links=False, unfurl_media=False)
+    except Exception as e:  # noqa: BLE001
+        log.error("failed to post passive reply", extra={"error": str(e)})
 
 
 @celery_app.task(name="app.workers.tasks.channel_digest")

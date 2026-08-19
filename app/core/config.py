@@ -74,6 +74,26 @@ class Settings(BaseSettings):
     useful_bot_ids: list[str] = Field(default_factory=list, alias="USEFUL_BOT_IDS")
     slack_auto_join: bool = Field(default=False, alias="SLACK_AUTO_JOIN")
 
+    # --- passive / ambient auto-answer ---
+    # When on, the bot listens to normal (un-mentioned) top-level messages in allowlisted
+    # channels and replies in-thread ONLY when it is confident. Otherwise it stays silent.
+    enable_passive_reply: bool = Field(default=False, alias="ENABLE_PASSIVE_REPLY")
+    # Confidence bar for an unsolicited reply — deliberately higher than RAG_RELEVANCE_FLOOR.
+    passive_confidence_floor: float = Field(default=0.5, alias="PASSIVE_CONFIDENCE_FLOOR")
+    # Skip trivially short messages ("ok", "thanks", emoji) before spending a query.
+    passive_min_chars: int = Field(default=12, alias="PASSIVE_MIN_CHARS")
+
+    # --- answer enrichment ---
+    # "Discussed before" — surface older relevant threads alongside an answer.
+    enable_related_threads: bool = Field(default=True, alias="ENABLE_RELATED_THREADS")
+    related_threads_max: int = Field(default=2, alias="RELATED_THREADS_MAX")
+    # Only count a thread as "prior" if it's at least this old (days) — hides just-posted msgs.
+    related_threads_min_age_days: float = Field(default=0.5, alias="RELATED_THREADS_MIN_AGE_DAYS")
+    # A thread must be at least this cosine-relevant to be shown (kills weak/off-topic matches).
+    related_threads_min_score: float = Field(default=0.5, alias="RELATED_THREADS_MIN_SCORE")
+    # Append a "🟢 High confidence · N sources" footer to answers.
+    enable_confidence_badge: bool = Field(default=True, alias="ENABLE_CONFIDENCE_BADGE")
+
     # --- rag ---
     rag_top_k: int = Field(default=8, alias="RAG_TOP_K")
     rag_overfetch_k: int = Field(default=20, alias="RAG_OVERFETCH_K")

@@ -76,6 +76,7 @@ class Passage:
     snippet: str
     created_epoch: int
     score: float
+    cos: float = 0.0  # raw cosine (pre-fusion) — a true 0..1 relevance signal for callers
 
 
 def _cosine(a: list[float] | None, b: list[float] | None) -> float:
@@ -180,6 +181,11 @@ def retrieve(store: QdrantStore, query_vector: list[float], req: QueryRequest) -
 
     # relevance floor is calibrated on cosine, so capture it BEFORE fusion overwrites score
     best_score = max((h.score for h in hits), default=0.0)
+    # keep the per-doc cosine too — fusion below overwrites .score with a rank score
+    cosine_by_doc: dict[str, float] = {}
+    for h in hits:
+        if h.score > cosine_by_doc.get(h.doc_id, 0.0):
+            cosine_by_doc[h.doc_id] = h.score
 
     if settings.rag_hybrid and khits:
         _rrf_fuse(hits, req.question, settings.rag_rrf_k)
@@ -219,6 +225,7 @@ def retrieve(store: QdrantStore, query_vector: list[float], req: QueryRequest) -
                 snippet=_clean_snippet(h.text),
                 created_epoch=h.created_epoch,
                 score=h.score,
+                cos=cosine_by_doc.get(h.doc_id, 0.0),
             )
         )
     return RetrievalResult(passages, best_score, True)

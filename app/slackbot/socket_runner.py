@@ -1,8 +1,9 @@
 """Slack Socket Mode listener — the @mention bot without a public URL.
 
-Connects to Slack over a WebSocket using the app-level token (xapp-…), receives
-`app_mention` events, and hands each to the same Celery `handle_mention` task the HTTP
-Events endpoint uses. Run as its own process: `python -m app.slackbot`.
+Connects to Slack over a WebSocket using the app-level token (xapp-…) and hands events to
+Celery: `app_mention` → `handle_mention` (agentic, thread memory); and, when passive replies
+are enabled, plain `message` events → `handle_passive_message` (confidence-gated). Same tasks
+the HTTP Events endpoint uses. Run as its own process: `python -m app.slackbot`.
 """
 
 from __future__ import annotations
@@ -31,6 +32,15 @@ def _on_request(client: SocketModeClient, req: SocketModeRequest) -> None:
         from app.workers.tasks import handle_mention
 
         handle_mention.delay(event)  # the worker does the work + posts the reply
+        return
+    # Ambient path: un-mentioned messages, replied to only when the bot is confident.
+    from app.slackbot.passive import should_consider
+
+    if should_consider(event):
+        new_correlation_id()
+        from app.workers.tasks import handle_passive_message
+
+        handle_passive_message.delay(event)
 
 
 def main() -> None:

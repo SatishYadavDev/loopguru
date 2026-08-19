@@ -155,9 +155,16 @@ class SlackConnector:
         subtype = msg.get("subtype")
         if subtype in DROP_SUBTYPES:
             return False
-        if subtype == "bot_message":
-            bot_id = msg.get("bot_id") or msg.get("user", "")
-            return bot_id in settings.useful_bot_ids
+        # Never index our own bot's replies — otherwise its answers get indexed and then
+        # cited as "sources" (circular / self-referential citations).
+        if settings.slack_bot_user_id and msg.get("user") == settings.slack_bot_user_id:
+            return False
+        # Any bot-authored message (subtype "bot_message" OR a raw bot_id, as chat.postMessage
+        # replies carry) is kept only if the bot is explicitly allowlisted.
+        bot_id = msg.get("bot_id")
+        if subtype == "bot_message" or bot_id:
+            who = bot_id or msg.get("user", "")
+            return who in settings.useful_bot_ids
         return True
 
     def to_documents(self, item: RawItem) -> list[Document]:

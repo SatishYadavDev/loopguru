@@ -697,6 +697,48 @@ loopguru/
 
 Newest first. Keep this in sync with `FEATURES.md`'s Progress log.
 
+### 2026-08-19 — On-demand source finder + Slack reply polish ✅ done
+- **find_discussions tool** (`app/slackbot/agent.py`) backed by `app/rag/service.py::find_sources`
+  — retrieval-only, relevance-gated (`RELATED_THREADS_MIN_SCORE`), returns Slack thread **and
+  file** links (files included, unlike the auto "discussed before" list). For explicit asks like
+  "where was this discussed / share the thread / koi example/link hai kya?".
+- Removed the "@ me in this thread to continue" footer from passive replies.
+- Slack replies now post with `unfurl_links=false, unfurl_media=false` (no giant link-preview
+  boxes for cited permalinks) — both the @mention handler and the passive task.
+
+### 2026-08-19 — "Discussed before" + confidence badge + self-citation fix ✅ done
+- **Discussed before:** `QueryResponse.related` (`RelatedThread`) — `app/rag/service.py::_related_threads`
+  ranks older, relevant **message-type** passages (doc_id without `:file:`) by **raw cosine**
+  (`Passage.cos`, captured pre-fusion in the retriever), keeping only those ≥
+  `RELATED_THREADS_MIN_SCORE` (kills weak/off-topic leaks) and older than
+  `RELATED_THREADS_MIN_AGE_DAYS`, excludes already-cited permalinks, one link per thread.
+- **Confidence badge:** answers end with 🟢/🟡/🟠 + source count, derived from `best_score`
+  (pre-fusion cosine). Thresholds 0.6 / 0.45.
+- **Shared renderer:** `app/slackbot/formatting.py::format_answer` renders answer + sources +
+  related + badge; used by the @mention agent tool (`answer_question`) and `handle_passive_message`.
+- **Self-citation fix:** `SlackConnector._keep_message` now drops messages authored by our own
+  bot (`SLACK_BOT_USER_ID`) and any `bot_id`-carrying message not in `USEFUL_BOT_IDS`, so the
+  bot's past answers are no longer indexed and cited. `#testing` was purged + re-backfilled.
+- Config: `ENABLE_RELATED_THREADS`, `RELATED_THREADS_MAX`, `RELATED_THREADS_MIN_AGE_DAYS`,
+  `ENABLE_CONFIDENCE_BADGE`.
+
+### 2026-08-19 — Ambient auto-answer (passive, confidence-gated replies) ✅ done
+- New opt-in mode: the bot replies to **un-mentioned** top-level messages in allowlisted
+  channels, but **only when confident**, otherwise it stays silent. The `@mention` agentic
+  path is unchanged.
+- `app/slackbot/passive.py`: `should_consider(event)` — a cheap, side-effect-free gate
+  (enabled? `message` type, no subtype/bot, top-level only, allowlisted channel, min length,
+  not already mentioning the bot) so junk never reaches a query; `strip_mentions()` helper.
+- Event routing: both transports (`socket_runner._on_request`, `POST /slack/events`) now
+  route qualifying `message` events to the new `handle_passive_message` Celery task
+  (`app/workers/tasks.py`), which runs RAG at a **raised floor** and posts an in-thread reply
+  with citations + a "@ me to continue" hint only if it clears the bar and has citations.
+- RAG plumbing: `QueryRequest.min_score` (per-query floor override) and
+  `QueryResponse.best_score` (confidence signal); `answer_query` honours the override.
+- Config: `ENABLE_PASSIVE_REPLY` (default off), `PASSIVE_CONFIDENCE_FLOOR` (0.5),
+  `PASSIVE_MIN_CHARS` (12). Requires the `message.channels` Slack event subscription
+  (scope `channels:history` already granted).
+
 ### 2026-08-18 — Agentic Slack bot (thread memory + tools) ✅ done
 - `app/slackbot/agent.py`: an OpenAI tool-calling loop replaces first-word routing. The
   bot passes the full thread transcript as memory and exposes tools `answer_question`,
