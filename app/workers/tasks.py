@@ -133,6 +133,7 @@ def handle_mention(self, event: dict) -> None:
     try:
         SlackClient().call("chat_postMessage", channel=channel, thread_ts=thread_ts, text=reply,
                            unfurl_links=False, unfurl_media=False)
+        log.info("mention: replied", extra={"scope_id": channel, "thread_ts": thread_ts})
     except Exception as e:  # noqa: BLE001
         log.error("failed to post Slack reply", extra={"error": str(e)})
 
@@ -174,6 +175,9 @@ def handle_passive_message(self, event: dict) -> None:
     try:
         SlackClient().call("chat_postMessage", channel=channel, thread_ts=ts, text=reply,
                            unfurl_links=False, unfurl_media=False)
+        log.info("passive: replied", extra={"scope_id": channel, "thread_ts": ts,
+                                            "score": resp.best_score,
+                                            "sources": len(resp.citations)})
     except Exception as e:  # noqa: BLE001
         log.error("failed to post passive reply", extra={"error": str(e)})
 
