@@ -60,6 +60,14 @@ async def slack_events(request: Request) -> dict:
         handle_mention.delay(event)
         return {"ok": True}
 
+    # Direct messages: every DM is addressed to the bot, no @mention needed.
+    if (event.get("type") == "message" and event.get("channel_type") == "im"
+            and not event.get("bot_id") and not event.get("subtype")):
+        from app.workers.tasks import handle_dm
+
+        handle_dm.delay(event)
+        return {"ok": True}
+
     # Ambient path: un-mentioned messages, replied to only when the bot is confident.
     from app.slackbot.passive import should_consider
 

@@ -55,19 +55,29 @@ class SlackConnector:
 
     # ---- lifecycle ---------------------------------------------------------
 
-    def prepare(self) -> None:
-        """Refresh identity cache + resolve workspace subdomain once per run."""
+    def prepare(self, refresh_identities: bool = True) -> None:
+        """Refresh identity cache + resolve workspace subdomain once per run.
+
+        Interactive handlers (the @mention / DM bot) pass refresh_identities=False: the
+        cached names in Postgres are good enough, and re-fetching the whole workspace
+        directory (`users.list`, hundreds of KB) on every message is slow and flaky.
+        """
         if self._prepared:
             return
-        auth = self.client.auth_test()
         if not self.subdomain:
-            url = auth.get("url", "")  # e.g. https://your-workspace.slack.com/
+            url = self.client.auth_test().get("url", "")  # e.g. https://your-workspace.slack.com/
             self.subdomain = url.replace("https://", "").replace("http://", "").split(".")[0]
-        refresh_identity_cache(self.client)
-        refresh_channel_names(self.client)
+        if refresh_identities:
+            refresh_identity_cache(self.client)
+            refresh_channel_names(self.client)
         self.names = load_identity_map()
+        if not self.names and not refresh_identities:  # cold cache — fetch once
+            refresh_identity_cache(self.client)
+            refresh_channel_names(self.client)
+            self.names = load_identity_map()
         self._prepared = True
-        log.info("slack connector prepared", extra={"subdomain": self.subdomain})
+        log.info("slack connector prepared",
+                 extra={"subdomain": self.subdomain, "refreshed": refresh_identities})
 
     # ---- scopes ------------------------------------------------------------
 

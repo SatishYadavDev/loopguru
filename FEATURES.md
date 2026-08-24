@@ -66,6 +66,8 @@ flowchart LR
 | **"Discussed before" detector** | Every answer also surfaces **older relevant threads** ("📌 Ye pehle bhi discuss hua tha: …") so you can jump to where a topic was talked about earlier — reuses the same semantic retrieval. |
 | **Find the source/thread on demand** | `@loopguru was this discussed before? share it` or `…koi payable funds ka example/link hai kya?` → the bot returns the matching **Slack thread & file links** (a `find_discussions` tool), no answer text — just where it lives. |
 | **Confidence badge** | Each answer ends with a **🟢/🟡/🟠 confidence · N sources** footer so readers know how much to trust it (derived from the top retrieval score). |
+| **DM the bot** | Message `@loopguru` directly — in a DM every message is for the bot, no `@` needed. Same agentic brain (answers, summaries, tickets, reminders) but private. |
+| **Reminders** | "kal 5 baje deployment check karna yaad dilana" → the bot schedules it and pings at that time, right where you asked. Remind someone else too ("@Darshan ko kal yaad dila dena") — they get a DM saying who asked. `list`/`cancel` supported. |
 | **Incremental sync** | Resumable first-time backfill + daily auto-sync; deletions reconciled weekly |
 | **Idempotent + dedup** | Re-runs never duplicate; unchanged content is skipped (saves time & cost) |
 | **REST API + Auth** | `POST /query` + admin endpoints, API-key auth, rate limiting |
@@ -122,6 +124,12 @@ then ask about it. Admin HTTP endpoints (same actions) are at `http://localhost:
 if the bot is confident it replies in-thread; if not, it stays silent and normal chat
 continues. Tune the bar with `PASSIVE_CONFIDENCE_FLOOR` (default `0.5`).
 
+**DM + reminders**: open a DM with the app and just type (no `@` needed) — it needs the
+`im:history` scope, the `message.im` bot event, and the App Home **Messages Tab** enabled.
+Reminders work anywhere: `remind me tomorrow 5pm to check the deployment` ·
+`@Darshan ko kal 11 baje yaad dila dena standup ke liye` · `list my reminders` ·
+`cancel reminder 3`. Times are read in `REMINDER_TIMEZONE` (default `Asia/Kolkata`).
+
 ## Tech stack
 
 Python · FastAPI · Celery + RabbitMQ · Qdrant (vectors) · Postgres · OpenAI (embeddings +
@@ -129,6 +137,20 @@ chat + vision) · PyMuPDF · Docker Compose
 
 ## Progress log
 
+- **2026-08-24 — DM/reminder fixes:** ✅ done. (1) Interactive handlers no longer re-fetch the
+  whole workspace directory (`users.list`, ~300 KB) per message — they read the cached names
+  from Postgres (`prepare(refresh_identities=False)`), which removes the intermittent
+  `IncompleteRead` → "Sorry, I hit an error" failures. (2) DMs get their own prompt (a greeting
+  is answered normally) and search **all** indexed channels instead of the DM's own scope.
+  (3) `list_reminders` can include past ones (`include_done`) for "mera previous reminder kya
+  tha?". (4) The agent must copy tool links verbatim in Slack `<url|label>` form (no markdown).
+- **2026-08-21 — DM support + reminders:** ✅ done. The bot now handles **direct messages**
+  (`message.im` → `handle_dm`, recent DM history as memory; no `@` needed) and can schedule
+  **reminders** in natural language. New `reminders` table (migration `0003`) +
+  `app/slackbot/reminders.py`; agent tools `create_reminder` / `list_reminders` /
+  `cancel_reminder`, with the current local time injected into the system prompt so
+  "kal 5 baje" resolves correctly. Celery Beat ticks `deliver_due_reminders` every minute;
+  a reminder for someone else is delivered to **their DM**, naming who asked.
 - **2026-08-19 — "Discussed before" + confidence badge:** ✅ done. Every answer now also
   lists **older relevant threads** (`QueryResponse.related`, built in `app/rag/service.py`
   from retrieved message-type passages, excluding already-cited links, older than

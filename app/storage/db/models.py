@@ -144,6 +144,30 @@ class ThreadTicket(Base):
     )
 
 
+class Reminder(Base):
+    """A natural-language reminder the bot will deliver at `remind_at`.
+
+    `channel_id` is where the ping goes (a DM channel or a public channel); when the
+    reminder was requested for someone else, `target_user_id` is that person and the ping
+    goes to their DM instead, noting who asked for it.
+    """
+
+    __tablename__ = "reminders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    requester_user_id: Mapped[str] = mapped_column(String(64), index=True)
+    target_user_id: Mapped[str | None] = mapped_column(String(64))  # None = the requester
+    channel_id: Mapped[str] = mapped_column(String(64))
+    thread_ts: Mapped[str | None] = mapped_column(String(32))
+    text: Mapped[str] = mapped_column(Text)
+    remind_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|sent|cancelled
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class QueryAudit(Base):
     __tablename__ = "query_audit"
 

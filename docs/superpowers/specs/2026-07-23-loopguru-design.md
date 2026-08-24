@@ -697,6 +697,37 @@ loopguru/
 
 Newest first. Keep this in sync with `FEATURES.md`'s Progress log.
 
+### 2026-08-24 — DM/reminder hardening ✅ done
+- **Identity cache reuse:** `SlackConnector.prepare()` takes `refresh_identities`; the
+  @mention and DM handlers pass `False` so they load the 280+ id→name pairs from the
+  `identity_cache` table instead of calling `users.list` (hundreds of KB) on every message.
+  That call was the source of intermittent `IncompleteRead` errors surfacing to users as
+  "Sorry, I hit an error". Cold cache still triggers one fetch; ingestion keeps refreshing daily.
+- **DM prompt + scope:** `run_agent(..., is_dm=True)` swaps in a DM-specific instruction (a
+  greeting gets a normal reply instead of "no request addressed to me") and drops the
+  channel scope filter, so DM questions search everything indexed.
+- **Reminder history:** `recent_reminders_for` + `render_pending(include_done=True)`, exposed
+  through the `list_reminders` tool, answers "what were my previous reminders?".
+- **Link format:** the agent is instructed to copy tool-provided links verbatim as Slack
+  `<url|label>`; it had been rewriting them as markdown, which Slack renders literally.
+
+### 2026-08-21 — Direct messages + reminders ✅ done
+- **DM path:** `message` events with `channel_type == "im"` route to a new `handle_dm` task
+  (both transports). Every DM is addressed to the bot, so no `@mention` gate; the last ~12
+  DM messages form the transcript memory, then the same `run_agent` loop runs. Requires the
+  `im:history` scope, `message.im` bot event, and App Home → Messages Tab enabled.
+- **Reminders:** new `reminders` table (`app/storage/db/models.py::Reminder`, migration
+  `0003_reminders`) with requester/target/channel/thread/text/remind_at/status.
+  `app/slackbot/reminders.py` validates the model-produced local time
+  (`YYYY-MM-DD HH:MM` in `REMINDER_TIMEZONE`), rejects past/unparseable times, resolves a
+  target person by display name (`user_id_by_name` reverse identity lookup), and renders
+  confirmations. Agent tools: `create_reminder`, `list_reminders`, `cancel_reminder`;
+  `run_agent` now takes the Slack `user_id` and injects CURRENT TIME into the system prompt.
+- **Delivery:** Beat entry `reminders-tick` (every 60s) → `deliver_due_reminders`, which posts
+  where the reminder was set, or to the **target's DM** ("Reminder from <@requester>") when it
+  was set for someone else; each row is marked `sent` only after a successful post.
+- Config: `ENABLE_REMINDERS`, `REMINDER_TIMEZONE` (default `Asia/Kolkata`).
+
 ### 2026-08-19 — On-demand source finder + Slack reply polish ✅ done
 - **find_discussions tool** (`app/slackbot/agent.py`) backed by `app/rag/service.py::find_sources`
   — retrieval-only, relevance-gated (`RELATED_THREADS_MIN_SCORE`), returns Slack thread **and

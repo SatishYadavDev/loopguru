@@ -26,6 +26,11 @@ celery_app.conf.update(
     timezone="UTC",
     beat_schedule={
         # Daily sweep: bootstrap pending backfills + run incremental for completed scopes.
+        # Reminders: check every minute so a scheduled ping fires on time.
+        "reminders-tick": {
+            "task": "app.workers.tasks.deliver_due_reminders",
+            "schedule": 60.0,
+        },
         "daily-sync": {
             "task": "app.workers.tasks.daily_sweep",
             "schedule": crontab(hour=2, minute=0),

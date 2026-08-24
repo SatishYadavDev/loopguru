@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     # Append a "🟢 High confidence · N sources" footer to answers.
     enable_confidence_badge: bool = Field(default=True, alias="ENABLE_CONFIDENCE_BADGE")
 
+    # --- reminders ---
+    # Timezone natural-language reminder times ("kal 5 baje") are interpreted in.
+    reminder_timezone: str = Field(default="Asia/Kolkata", alias="REMINDER_TIMEZONE")
+    enable_reminders: bool = Field(default=True, alias="ENABLE_REMINDERS")
+
     # --- rag ---
     rag_top_k: int = Field(default=8, alias="RAG_TOP_K")
     rag_overfetch_k: int = Field(default=20, alias="RAG_OVERFETCH_K")

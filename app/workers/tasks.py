@@ -113,7 +113,7 @@ def handle_mention(self, event: dict) -> None:
     thread_ts = event.get("thread_ts") or event.get("ts")  # reply stays in a thread
     try:
         conn = SlackConnector()
-        conn.prepare()
+        conn.prepare(refresh_identities=False)
         lines = []
         if event.get("thread_ts"):  # established thread → full transcript = memory
             for m in conn.client.paginate(
@@ -126,7 +126,7 @@ def handle_mention(self, event: dict) -> None:
         else:  # top-level mention → just this message
             t = re.sub(r"<@[^>]+>", "", message_text(event, conn.names, conn.names)).strip()
             lines.append(f"user: {t}")
-        reply = run_agent(channel, thread_ts, "\n".join(lines))
+        reply = run_agent(channel, thread_ts, "\n".join(lines), event.get("user", ""))
     except Exception as e:  # noqa: BLE001
         log.warning("mention handling failed", extra={"error": str(e)})
         reply = "Sorry, I hit an error handling that. Please try again."
@@ -180,6 +180,91 @@ def handle_passive_message(self, event: dict) -> None:
                                             "sources": len(resp.citations)})
     except Exception as e:  # noqa: BLE001
         log.error("failed to post passive reply", extra={"error": str(e)})
+
+
+@celery_app.task(name="app.workers.tasks.handle_dm", bind=True, max_retries=1)
+def handle_dm(self, event: dict) -> None:
+    """A direct message to the bot — every DM is for us, so no @mention is needed."""
+    from app.connectors.slack.client import SlackClient
+    from app.connectors.slack.connector import SlackConnector
+    from app.connectors.slack.normalizer import message_text
+    from app.slackbot.agent import run_agent
+
+    new_correlation_id()
+    channel = event.get("channel", "")
+    user = event.get("user", "")
+    thread_ts = event.get("thread_ts")  # DMs are usually flat; keep threads if used
+    try:
+        conn = SlackConnector()
+        conn.prepare(refresh_identities=False)
+        lines = []
+        if thread_ts:  # threaded DM → full transcript as memory
+            for m in conn.client.paginate(
+                "conversations_replies", "messages", channel=channel, ts=thread_ts
+            ):
+                t = message_text(m, conn.names, conn.names).strip()
+                if t:
+                    who = "assistant" if m.get("bot_id") else conn.names.get(m.get("user", ""), "user")
+                    lines.append(f"{who}: {t}")
+        else:  # flat DM → recent history gives the conversation memory
+            history = conn.client.call(
+                "conversations_history", channel=channel, limit=12
+            ).get("messages", [])
+            for m in reversed(history):
+                t = message_text(m, conn.names, conn.names).strip()
+                if t:
+                    who = "assistant" if m.get("bot_id") else conn.names.get(m.get("user", ""), "user")
+                    lines.append(f"{who}: {t}")
+        reply = run_agent(channel, thread_ts, "\n".join(lines), user, is_dm=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("dm handling failed", extra={"error": str(e)})
+        reply = "Sorry, I hit an error handling that. Please try again."
+    try:
+        SlackClient().call("chat_postMessage", channel=channel, thread_ts=thread_ts, text=reply,
+                           unfurl_links=False, unfurl_media=False)
+        log.info("dm: replied", extra={"scope_id": channel})
+    except Exception as e:  # noqa: BLE001
+        log.error("failed to post DM reply", extra={"error": str(e)})
+
+
+@celery_app.task(name="app.workers.tasks.deliver_due_reminders")
+def deliver_due_reminders() -> None:
+    """Fire every reminder whose time has come (run once a minute by beat)."""
+    from app.connectors.slack.client import SlackClient
+    from app.storage.db import session_scope
+    from app.storage.db.repositories import due_reminders, mark_reminder_sent
+
+    new_correlation_id()
+    if not settings.enable_reminders:
+        return
+    with session_scope() as session:
+        rows = [
+            {"id": r.id, "requester": r.requester_user_id, "target": r.target_user_id,
+             "channel": r.channel_id, "thread_ts": r.thread_ts, "text": r.text}
+            for r in due_reminders(session)
+        ]
+    if not rows:
+        return
+    client = SlackClient()
+    for r in rows:
+        try:
+            if r["target"] and r["target"] != r["requester"]:
+                # someone else's reminder → deliver privately, naming who asked
+                dm = client.call("conversations_open", users=r["target"])
+                channel = (dm.get("channel") or {}).get("id") or r["channel"]
+                text = (f"⏰ Reminder from <@{r['requester']}>: {r['text']}")
+                thread_ts = None
+            else:
+                channel, thread_ts = r["channel"], r["thread_ts"]
+                text = f"⏰ <@{r['requester']}> reminder: {r['text']}"
+            client.call("chat_postMessage", channel=channel, thread_ts=thread_ts, text=text,
+                        unfurl_links=False, unfurl_media=False)
+        except Exception as e:  # noqa: BLE001 - one bad reminder must not block the rest
+            log.error("reminder delivery failed", extra={"reminder_id": r["id"], "error": str(e)})
+            continue
+        with session_scope() as session:
+            mark_reminder_sent(session, r["id"])
+        log.info("reminder: delivered", extra={"reminder_id": r["id"]})
 
 
 @celery_app.task(name="app.workers.tasks.channel_digest")

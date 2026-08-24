@@ -19,6 +19,7 @@ from app.storage.db.models import (
     IdentityCache,
     IngestionRun,
     QueryAudit,
+    Reminder,
     SyncState,
     ThreadRow,
 )
@@ -393,3 +394,99 @@ def record_query_audit(
             latency_ms=latency_ms,
         )
     )
+
+
+# --- reminders ---------------------------------------------------------------
+
+
+def add_reminder(
+    session, *, requester_user_id: str, target_user_id: str | None, channel_id: str,
+    thread_ts: str | None, text: str, remind_at: datetime,
+) -> Reminder:
+    row = Reminder(
+        requester_user_id=requester_user_id,
+        target_user_id=target_user_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        text=text[:2000],
+        remind_at=remind_at,
+    )
+    session.add(row)
+    session.flush()  # populate row.id for the confirmation message
+    return row
+
+
+def due_reminders(session, now: datetime | None = None, limit: int = 50) -> list[Reminder]:
+    """Pending reminders whose time has come (oldest first)."""
+    moment = now or datetime.now(timezone.utc)
+    stmt = (
+        select(Reminder)
+        .where(Reminder.status == "pending", Reminder.remind_at <= moment)
+        .order_by(Reminder.remind_at)
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars())
+
+
+def mark_reminder_sent(session, reminder_id: int) -> None:
+    session.execute(
+        update(Reminder)
+        .where(Reminder.id == reminder_id)
+        .values(status="sent", delivered_at=datetime.now(timezone.utc))
+    )
+
+
+def pending_reminders_for(session, user_id: str, limit: int = 20) -> list[Reminder]:
+    """Reminders this user asked for that haven't fired yet."""
+    stmt = (
+        select(Reminder)
+        .where(Reminder.requester_user_id == user_id, Reminder.status == "pending")
+        .order_by(Reminder.remind_at)
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars())
+
+
+def recent_reminders_for(session, user_id: str, limit: int = 10) -> list[Reminder]:
+    """The user's latest reminders whatever their status — for "what were my past ones?"."""
+    stmt = (
+        select(Reminder)
+        .where(Reminder.requester_user_id == user_id)
+        .order_by(Reminder.remind_at.desc())
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars())
+
+
+def cancel_reminder(session, reminder_id: int, user_id: str) -> bool:
+    """Cancel one of the user's own pending reminders. Returns False if not theirs."""
+    result = session.execute(
+        update(Reminder)
+        .where(
+            Reminder.id == reminder_id,
+            Reminder.requester_user_id == user_id,
+            Reminder.status == "pending",
+        )
+        .values(status="cancelled")
+    )
+    return bool(result.rowcount)
+
+
+def user_id_by_name(session, source: str, name: str) -> str | None:
+    """Reverse identity lookup: a display name (as written in Slack) → user id."""
+    target = (name or "").lstrip("@").strip().lower()
+    if not target:
+        return None
+    rows = session.execute(
+        select(IdentityCache.entity_id, IdentityCache.display_name).where(
+            IdentityCache.source == source, IdentityCache.kind == "user"
+        )
+    ).all()
+    for entity_id, display in rows:  # exact match first, then first-name / prefix
+        if (display or "").strip().lower() == target:
+            return entity_id
+    for entity_id, display in rows:
+        d = (display or "").strip().lower()
+        if d.startswith(target) or target.startswith(d.split(" ")[0]):
+            return entity_id
+    return None

@@ -28,6 +28,12 @@ _SYSTEM = (
     "Slack thread & file links (no answer text, just the links). Prefer this over "
     "answer_question when the user wants the SOURCE/thread itself, not an explanation.\n"
     "- summarize_thread / summarize_channel: summaries.\n"
+    "- create_reminder: when the user asks to be reminded (\"kal 5 baje yaad dilana\", "
+    "\"remind me in 2 hours\"). Convert their words to an absolute local time and pass it as "
+    "when_local in 'YYYY-MM-DD HH:MM' 24-hour form, using CURRENT TIME below as the anchor. "
+    "Put WHAT to remind about in text. If they ask to remind SOMEONE ELSE (\"@Darshan ko kal "
+    "yaad dila dena\"), pass that person's name in target_name.\n"
+    "- list_reminders / cancel_reminder: show or cancel the user's pending reminders.\n"
     "- create_ticket: file an Azure Boards ticket (omit title/description to draft them "
     "from the thread).\n"
     "- get_ticket: read a ticket's CURRENT fields (title, description, state, assignee).\n"
@@ -43,7 +49,9 @@ _SYSTEM = (
     "ticket and MORE THAN ONE ticket appears in this thread, do NOT guess — ask them which "
     "one, listing the ticket numbers you see. Only omit work_item_id when exactly one ticket "
     "exists in the thread.\n"
-    "Keep replies concise for Slack. When answer_question returns sources, include them."
+    "Keep replies concise for Slack. When a tool returns sources or links, include them "
+    "and copy each link EXACTLY as the tool wrote it — Slack link format <url|label>. "
+    "Never rewrite links as markdown [label](url); Slack does not render that."
 )
 
 _TOOLS = [
@@ -58,6 +66,24 @@ _TOOLS = [
                         "exists. Returns links only (no generated answer)."),
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}},
                        "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "create_reminder",
+        "description": ("Schedule a reminder. when_local is an absolute local time "
+                        "'YYYY-MM-DD HH:MM' (24h). target_name only when reminding someone else."),
+        "parameters": {"type": "object", "properties": {
+            "when_local": {"type": "string"}, "text": {"type": "string"},
+            "target_name": {"type": "string"}},
+            "required": ["when_local", "text"]}}},
+    {"type": "function", "function": {
+        "name": "list_reminders",
+        "description": ("List the user's reminders. Default = upcoming/pending only; pass "
+                        "include_done=true when they ask about past/previous/old reminders."),
+        "parameters": {"type": "object",
+                       "properties": {"include_done": {"type": "boolean"}}}}},
+    {"type": "function", "function": {
+        "name": "cancel_reminder", "description": "Cancel one of the user's pending reminders.",
+        "parameters": {"type": "object", "properties": {"reminder_id": {"type": "integer"}},
+                       "required": ["reminder_id"]}}},
     {"type": "function", "function": {
         "name": "summarize_thread", "description": "Summarize the current thread.",
         "parameters": {"type": "object", "properties": {}}}},
@@ -96,19 +122,24 @@ def _clean_assignee(v: str | None) -> str | None:
     return (m.group(1) if m else v).strip("<>").strip()
 
 
-def _make_tools(channel: str, thread_ts: str | None, transcript: str) -> dict:
+def _make_tools(channel: str, thread_ts: str | None, transcript: str,
+                user_id: str = "", is_dm: bool = False) -> dict:
+    # In a channel, knowledge questions stay scoped to that channel; in a DM there is no
+    # channel context, so search everything indexed.
+    scope = None if is_dm else channel
+
     def answer_question(question: str = "") -> str:
         from app.rag.service import answer_query
         from app.schemas.query import QueryFilters, QueryRequest
         from app.slackbot.formatting import format_answer
 
-        r = answer_query(QueryRequest(question=question, filters=QueryFilters(scope_id=channel)))
+        r = answer_query(QueryRequest(question=question, filters=QueryFilters(scope_id=scope)))
         return format_answer(r)
 
     def find_discussions(query: str = "", **_) -> str:
         from app.rag.service import find_sources
 
-        hits = find_sources(query, scope_id=channel, limit=3)
+        hits = find_sources(query, scope_id=scope, limit=3)
         if not hits:
             return "I couldn't find any prior thread or file about that."
         links = "\n".join(
@@ -117,6 +148,24 @@ def _make_tools(channel: str, thread_ts: str | None, transcript: str) -> dict:
             for h in hits
         )
         return f"Here's where this shows up:\n{links}"
+
+    def create_reminder(when_local: str = "", text: str = "", target_name: str | None = None) -> str:
+        from app.slackbot.reminders import schedule_reminder
+
+        return schedule_reminder(
+            requester_user_id=user_id, channel_id=channel, thread_ts=thread_ts,
+            when_local=when_local, text=text, target_name=target_name,
+        )
+
+    def list_reminders(include_done: bool = False, **_) -> str:
+        from app.slackbot.reminders import render_pending
+
+        return render_pending(user_id, include_done=bool(include_done))
+
+    def cancel_reminder(reminder_id: int = 0, **_) -> str:
+        from app.slackbot.reminders import cancel
+
+        return cancel(user_id, int(reminder_id))
 
     def summarize_thread(**_) -> str:
         from app.rag.summarizer import summarize_thread as st
@@ -233,6 +282,9 @@ def _make_tools(channel: str, thread_ts: str | None, transcript: str) -> dict:
     return {
         "answer_question": answer_question,
         "find_discussions": find_discussions,
+        "create_reminder": create_reminder,
+        "list_reminders": list_reminders,
+        "cancel_reminder": cancel_reminder,
         "summarize_thread": summarize_thread,
         "summarize_channel": summarize_channel,
         "create_ticket": create_ticket,
@@ -242,13 +294,39 @@ def _make_tools(channel: str, thread_ts: str | None, transcript: str) -> dict:
     }
 
 
-def run_agent(channel: str, thread_ts: str | None, transcript: str) -> str:
-    tools = _make_tools(channel, thread_ts, transcript)
+def _now_context() -> str:
+    """Current local time — the anchor the model uses to resolve 'kal 5 baje' etc."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(settings.reminder_timezone)
+    except Exception:  # noqa: BLE001 - bad tz name shouldn't break the bot
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+    return (f"\nCURRENT TIME: {now:%Y-%m-%d %H:%M} ({now:%A}) "
+            f"in timezone {settings.reminder_timezone}.")
+
+
+_DM_NOTE = (
+    "\nYou are in a one-on-one DIRECT MESSAGE with this user, not a channel thread. Every "
+    "message here is addressed to you, so always respond to their latest message. For a "
+    "greeting or small talk, reply warmly in one line and briefly offer what you can do "
+    "(answer questions from internal Slack knowledge, summarize, set reminders, file or edit "
+    "Azure tickets). Never say a message wasn't addressed to you."
+)
+
+
+def run_agent(channel: str, thread_ts: str | None, transcript: str, user_id: str = "",
+              is_dm: bool = False) -> str:
+    tools = _make_tools(channel, thread_ts, transcript, user_id, is_dm)
+    system = _SYSTEM + (_DM_NOTE if is_dm else "") + _now_context()
+    label = "CONVERSATION" if is_dm else "THREAD"
+    ask = ("Respond to the user's latest message." if is_dm
+           else "Respond to the most recent request addressed to you.")
     messages: list = [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content":
-            f"THREAD so far (oldest → newest):\n{transcript}\n\n"
-            "Respond to the most recent request addressed to you."},
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"{label} so far (oldest → newest):\n{transcript}\n\n{ask}"},
     ]
     for _ in range(5):
         resp = get_openai().chat.completions.create(

@@ -33,6 +33,15 @@ def _on_request(client: SocketModeClient, req: SocketModeRequest) -> None:
 
         handle_mention.delay(event)  # the worker does the work + posts the reply
         return
+    # Direct messages: every DM is addressed to the bot, no @mention needed.
+    if (event.get("type") == "message" and event.get("channel_type") == "im"
+            and not event.get("bot_id") and not event.get("subtype")):
+        new_correlation_id()
+        from app.workers.tasks import handle_dm
+
+        handle_dm.delay(event)
+        return
+
     # Ambient path: un-mentioned messages, replied to only when the bot is confident.
     from app.slackbot.passive import should_consider
 
