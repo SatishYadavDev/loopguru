@@ -2,16 +2,23 @@
 # Create the app from this manifest at https://api.slack.com/apps -> Create New App
 # -> From an app manifest. After changing scopes you MUST reinstall the app.
 #
-# Minimum read-only scopes. DM scopes are intentionally excluded.
+# Covers everything the bot does: indexing allowlisted channels (read scopes),
+# @mention / DM answers, summaries, tickets and reminders (chat:write + im:*).
+# Runs over Socket Mode, so no public URL is needed — generate an app-level token
+# with `connections:write` after creating the app (see INSTALLATION.md §2).
 # `channels:join` is optional — include it only if you want the bot to auto-join
 # public channels (SLACK_AUTO_JOIN=true); otherwise invite the bot manually.
 
 display_information:
-  name: loopguru
-  description: Internal knowledge agent that indexes allowlisted channels to answer how-to questions.
+  name: LoopGuru
+  description: Knowledge agent that indexes allowlisted channels and answers how-to questions with sources.
   background_color: "#4a154b"
 
 features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true              # lets people DM the bot
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: loopguru
     always_online: true
@@ -24,10 +31,23 @@ oauth_config:
       - groups:history        # read private channel messages (bot must be invited)
       - groups:read           # private channel metadata
       - users:read            # resolve user IDs -> display names
-      - files:read            # download shared files (PDF/MD/txt/docx)
+      - files:read            # download shared files (PDF/MD/txt/docx/canvases)
+      - app_mentions:read     # receive @loopguru mentions
+      - chat:write            # reply in threads, DMs and reminders
+      - im:history            # read DMs sent to the bot
+      - im:read               # DM metadata
+      - im:write              # open a DM to deliver a reminder
       # - channels:join       # OPTIONAL: allow auto-join of public channels
 
 settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention           # @loopguru <question | summarize | ticket>
+      - message.im            # direct messages
+      - message.channels      # ambient auto-answer (only acts if ENABLE_PASSIVE_REPLY=true)
+      - message.groups        # same, for private channels
+  interactivity:
+    is_enabled: false
   org_deploy_enabled: false
-  socket_mode_enabled: false
+  socket_mode_enabled: true
   token_rotation_enabled: false

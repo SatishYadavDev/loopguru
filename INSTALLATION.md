@@ -33,13 +33,26 @@ Edit `.env` and set at minimum:
 2. Pick your workspace, then paste the contents of [`slack_app_manifest.yaml`](slack_app_manifest.yaml).
 3. Create the app, then **Install to Workspace** and authorize.
 4. Copy the **Bot User OAuth Token** (`xoxb-...`) into `.env` as `SLACK_BOT_TOKEN`.
+5. **Basic Information → App-Level Tokens → Generate** with the `connections:write`
+   scope; copy the `xapp-...` token into `.env` as `SLACK_APP_TOKEN` (Socket Mode).
+6. **Basic Information → Signing Secret** → `SLACK_SIGNING_SECRET` (only used by the
+   HTTP `/slack/events` transport, but keep it set).
+7. Put the bot's user ID (`U…`, from the bot's Slack profile) in `SLACK_BOT_USER_ID` and
+   your workspace subdomain in `SLACK_WORKSPACE_SUBDOMAIN`, then
+   `docker compose up -d --force-recreate`.
 
-**Scopes** the manifest requests (all read-only):
-`channels:history`, `channels:read`, `groups:history`, `groups:read`, `users:read`,
-`files:read`. (`channels:join` is optional — only if `SLACK_AUTO_JOIN=true`.)
+**Scopes** the manifest requests:
+- Read / indexing: `channels:history`, `channels:read`, `groups:history`, `groups:read`,
+  `users:read`, `files:read`.
+- Bot replies, DMs and reminders: `app_mentions:read`, `chat:write`, `im:history`,
+  `im:read`, `im:write`.
+- `channels:join` is optional — only if `SLACK_AUTO_JOIN=true`.
+
+**Bot events**: `app_mention`, `message.im`, `message.channels`, `message.groups` (the two
+channel events only trigger replies when `ENABLE_PASSIVE_REPLY=true`). The App Home
+**Messages Tab** is enabled so people can DM the bot.
 
 > If you change scopes later you MUST **reinstall the app** for them to take effect.
-> DM scopes are intentionally excluded.
 
 ### Invite the bot to each channel
 
