@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Short launcher for the LoopGuru CLI — runs inside the api container against the
 # in-container API. Examples:
-#   ./loopguru                      # interactive slash shell
+#   ./loopguru                  # interactive slash shell
 #   ./loopguru query "how to setup the uat?"
 #   ./loopguru summarize channel C0123 --days 7
 #   ./loopguru status

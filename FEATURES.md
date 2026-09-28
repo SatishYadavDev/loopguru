@@ -88,7 +88,7 @@ Start the stack: `docker compose up -d`. Then use the **`./loopguru`** launcher 
 interactive shell) — or the one-shot forms below.
 
 ```bash
-./loopguru                                        # interactive slash shell (/help inside)
+./loopguru                                    # interactive slash shell (/help inside)
 
 # Ask / RAG Q&A (grounded + cited; hybrid BM25+vector)
 ./loopguru query "how do I set up the UAT?"

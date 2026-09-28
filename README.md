@@ -91,7 +91,7 @@ A thin, stateless client over the same REST API (`app/cli`). The easiest entry i
 **`./loopguru`** launcher (runs the CLI inside the `api` container):
 
 ```bash
-./loopguru                                  # interactive slash shell — type /help
+./loopguru                              # interactive slash shell — type /help
 ```
 
 Inside the shell: plain text is a question; slash commands do everything else —

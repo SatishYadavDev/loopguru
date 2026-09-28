@@ -1,6 +1,8 @@
 # LoopGuru — full stack (PRD §21).
 # Named volumes persist data across restarts (avoid data loss + costly re-embed).
 
+name: loopguru
+
 services:
   postgres:
     image: postgres:16

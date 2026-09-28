@@ -2,7 +2,7 @@
 
 Two ways to use it:
   • Interactive shell (default): run with no command → a slash-command REPL.
-      loopguru                         # opens the shell
+      loopguru                     # opens the shell
       you › what is the UAT setup?  # plain text = a question
       you › /summarize channel C0123 7
       you › /help
