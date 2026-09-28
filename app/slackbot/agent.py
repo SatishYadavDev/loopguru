@@ -33,7 +33,12 @@ _SYSTEM = (
     "when_local in 'YYYY-MM-DD HH:MM' 24-hour form, using CURRENT TIME below as the anchor. "
     "Put WHAT to remind about in text. If they ask to remind SOMEONE ELSE (\"@Darshan ko kal "
     "yaad dila dena\"), pass that person's name in target_name.\n"
-    "- list_reminders / cancel_reminder: show or cancel the user's pending reminders.\n"
+    "- update_reminder: CHANGE an existing reminder (new time and/or new wording). When the "
+    "user corrects a reminder — \"nahi 10 baje karna\", \"make it tomorrow instead\" — you MUST "
+    "update the existing one, never call create_reminder again (that leaves a duplicate that "
+    "will also fire). The confirmation you sent earlier carries its id (e.g. \"Reminder #4\"); "
+    "reuse that id, or call list_reminders first if you don't know it.\n"
+    "- list_reminders / cancel_reminder: show or cancel the user's reminders.\n"
     "- create_ticket: file an Azure Boards ticket (omit title/description to draft them "
     "from the thread).\n"
     "- get_ticket: read a ticket's CURRENT fields (title, description, state, assignee).\n"
@@ -80,6 +85,14 @@ _TOOLS = [
                         "include_done=true when they ask about past/previous/old reminders."),
         "parameters": {"type": "object",
                        "properties": {"include_done": {"type": "boolean"}}}}},
+    {"type": "function", "function": {
+        "name": "update_reminder",
+        "description": ("Change an existing pending reminder's time and/or text. Use this for "
+                        "corrections instead of creating a second reminder."),
+        "parameters": {"type": "object", "properties": {
+            "reminder_id": {"type": "integer"},
+            "when_local": {"type": "string"}, "text": {"type": "string"}},
+            "required": ["reminder_id"]}}},
     {"type": "function", "function": {
         "name": "cancel_reminder", "description": "Cancel one of the user's pending reminders.",
         "parameters": {"type": "object", "properties": {"reminder_id": {"type": "integer"}},
@@ -161,6 +174,12 @@ def _make_tools(channel: str, thread_ts: str | None, transcript: str,
         from app.slackbot.reminders import render_pending
 
         return render_pending(user_id, include_done=bool(include_done))
+
+    def update_reminder(reminder_id: int = 0, when_local: str | None = None,
+                        text: str | None = None, **_) -> str:
+        from app.slackbot.reminders import reschedule
+
+        return reschedule(user_id, int(reminder_id), when_local, text)
 
     def cancel_reminder(reminder_id: int = 0, **_) -> str:
         from app.slackbot.reminders import cancel
@@ -284,6 +303,7 @@ def _make_tools(channel: str, thread_ts: str | None, transcript: str,
         "find_discussions": find_discussions,
         "create_reminder": create_reminder,
         "list_reminders": list_reminders,
+        "update_reminder": update_reminder,
         "cancel_reminder": cancel_reminder,
         "summarize_thread": summarize_thread,
         "summarize_channel": summarize_channel,

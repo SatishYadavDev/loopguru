@@ -458,6 +458,30 @@ def recent_reminders_for(session, user_id: str, limit: int = 10) -> list[Reminde
     return list(session.execute(stmt).scalars())
 
 
+def update_reminder(
+    session, reminder_id: int, user_id: str, *, remind_at: datetime | None = None,
+    text: str | None = None,
+) -> bool:
+    """Change the time and/or wording of one of the user's own pending reminders."""
+    values: dict = {}
+    if remind_at is not None:
+        values["remind_at"] = remind_at
+    if text is not None:
+        values["text"] = text[:2000]
+    if not values:
+        return False
+    result = session.execute(
+        update(Reminder)
+        .where(
+            Reminder.id == reminder_id,
+            Reminder.requester_user_id == user_id,
+            Reminder.status == "pending",
+        )
+        .values(**values)
+    )
+    return bool(result.rowcount)
+
+
 def cancel_reminder(session, reminder_id: int, user_id: str) -> bool:
     """Cancel one of the user's own pending reminders. Returns False if not theirs."""
     result = session.execute(

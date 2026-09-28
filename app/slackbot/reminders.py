@@ -19,6 +19,7 @@ from app.storage.db.repositories import (
     cancel_reminder,
     pending_reminders_for,
     recent_reminders_for,
+    update_reminder,
     user_id_by_name,
 )
 
@@ -109,6 +110,31 @@ def render_pending(user_id: str, include_done: bool = False) -> str:
     ]
     header = "Your recent reminders:" if include_done else "Your pending reminders:"
     return header + "\n" + "\n".join(lines)
+
+
+def reschedule(user_id: str, reminder_id: int, when_local: str | None = None,
+               text: str | None = None) -> str:
+    """Change an existing pending reminder instead of creating a duplicate."""
+    if not settings.enable_reminders:
+        return "Reminders are turned off."
+    when_utc = None
+    if when_local:
+        when_utc = _parse_local(when_local)
+        if not when_utc:
+            return f"I couldn't read the time '{when_local}'. Give me a clear time."
+        if when_utc <= datetime.now(timezone.utc):
+            return f"That time ({_local(when_utc)}) is already past — give me a future time."
+    if when_utc is None and not (text or "").strip():
+        return "Tell me the new time or the new wording."
+    with session_scope() as session:
+        ok = update_reminder(session, reminder_id, user_id,
+                             remind_at=when_utc, text=(text.strip() if text else None))
+    if not ok:
+        return (f"I couldn't update #{reminder_id} — it isn't yours, or it already fired. "
+                "Ask me to list your reminders.")
+    when_txt = f" for {_local(when_utc)}" if when_utc else ""
+    what_txt = f": {text.strip()}" if text else ""
+    return f"Updated reminder #{reminder_id}{when_txt}{what_txt}"
 
 
 def cancel(user_id: str, reminder_id: int) -> str:
